@@ -23,6 +23,7 @@ import org.scalatest.freespec.AnyFreeSpec
 import chiseltest.simulator.WriteFstAnnotation
 import mmu.AsidLookupEntry
 import play.TestUtils._
+import top.parameters._
 
 import scala.collection.mutable.ArrayBuffer
 //import chiseltest.simulator.
@@ -300,7 +301,7 @@ class AdvancedTest extends AnyFreeSpec with ChiselScalatestTester{ // Working in
 
     print(s"Hardware: num_warp = ${parameters.num_warp}, num_thread = ${parameters.num_thread}\n")
 
-    val mem = new MemBox(MemboxS.SV32)
+    val mem = if(MMU_ENABLED) (new MemBox(MemboxS.SV32)) else (new MemBox(MemboxS.Bare32))
     //mem.loadfile(0, metas.head, dataFileDir.head)
     test(new GPGPU_SimWrapper(FakeCache = false, Some(mmu.SV32))).withAnnotations(Seq(CachingAnnotation, VerilatorBackendAnnotation, WriteFstAnnotation)){ c =>
       c.io.host_req.initSource()
@@ -327,14 +328,14 @@ class AdvancedTest extends AnyFreeSpec with ChiselScalatestTester{ // Working in
         val message = "Run out of ASID"
         val cause: Throwable = null
       }
-      class RequestSenderGPU(gap: Int = 5) extends RequestSender(c.io.host_req, c.io.host_rsp){
+      class RequestSenderGPU(gap: Int = 5) extends RequestSender(c.io.host_req, c.io.host_rsp){ //req and resp between GPU and host
         override def finishWait(): Boolean = {
           clock_cnt - timestamp > gap
         }
-        def senderEval(): Unit = {
+        def senderEval(): Unit = {//send request to host
           if(send_list.nonEmpty && finishWait()){
             reqPort.valid.poke(true.B)
-            reqPort.bits.poke(send_list.head)
+            reqPort.bits.pokePartial(send_list.head)
           }
           else{
             reqPort.valid.poke(false.B)
@@ -343,7 +344,7 @@ class AdvancedTest extends AnyFreeSpec with ChiselScalatestTester{ // Working in
             send_list = send_list.tail
           }
         }
-        def receiverEval(): Unit = {
+        def receiverEval(): Unit = {//resp from host
           rspPort.ready.poke(true.B)
           if(checkForValid(rspPort) && checkForReady(rspPort)){
             val rsp = c.io.host_rsp.bits.peek().litValue
@@ -363,23 +364,29 @@ class AdvancedTest extends AnyFreeSpec with ChiselScalatestTester{ // Working in
       while(clock_cnt <= maxCycle && !wg_list.flatten.reduce(_ && _)){
         if(clock_cnt - timestamp == 0){
           print(s"kernel ${current_kernel} ${dataFileDir(current_kernel)}\n")
-
+          //todo only exist when mmu_enabled
           if(ptbr_table(ptbr_pos) == -1){
             ptbr_table(ptbr_pos) = mem.createRootPageTable()
-            c.io.asid_fill.valid.poke(true.B)
-          //  print(s"initializing kernel, asid = ${ptbr_pos}")
-            c.io.asid_fill.bits.poke((new AsidLookupEntry(mmu.SV32)).Lit(
-              _.ptbr -> ptbr_table(ptbr_pos).U,
-              _.asid -> ptbr_pos.U,
-              _.valid -> true.B
-            ))
+            if(MMU_ENABLED){
+              c.io.asid_fill.get.valid.poke(true.B)
+              //  print(s"initializing kernel, asid = ${ptbr_pos}")
+              c.io.asid_fill.get.bits.poke((new AsidLookupEntry(mmu.SV32)).Lit(
+                _.ptbr -> ptbr_table(ptbr_pos).U,
+                _.asid -> ptbr_pos.U,
+                _.valid -> true.B
+              ))
+            }
           }
-          else{ c.io.asid_fill.valid.poke(false.B) }
+          else{
+            if(MMU_ENABLED){c.io.asid_fill.get.valid.poke(false.B)}
+             }
 
-          meta = mem.loadfile(ptbr_table(ptbr_pos), metas(current_kernel), dataFileDir(current_kernel))
+          meta = mem.loadfile(ptbr_table(ptbr_pos), metas(current_kernel), dataFileDir(current_kernel))//todo loadfile mmu factor
           meta.asid = ptbr_pos
           size3d = meta.kernel_size.map(_.toInt)
           wg_list(current_kernel) = Array.fill(size3d(0) * size3d(1) * size3d(2))(false)
+          println("back to testbench!")
+          println(s"kernelsize 0:${size3d(0)}, size 1:${size3d(1)},size2:${size3d(2)} ")
 
           host_driver.add(
             for {
@@ -390,7 +397,11 @@ class AdvancedTest extends AnyFreeSpec with ChiselScalatestTester{ // Working in
           )
           ptbr_pos += 1
         }
-        else c.io.asid_fill.valid.poke(false.B)
+        else {
+          if(MMU_ENABLED){
+            c.io.asid_fill.get.valid.poke(false.B)
+          }
+        }
 
         if(ptbr_pos >= 255) throw AsidException
 

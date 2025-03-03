@@ -6,6 +6,7 @@ import chisel3.experimental.BundleLiterals._
 import chisel3.experimental.VecLiterals._
 import chiseltest._
 import top._
+import top.parameters._
 import L2cache.{TLBundleA_lite, TLBundleD_lite}
 
 object TestUtils {
