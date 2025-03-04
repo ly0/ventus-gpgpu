@@ -141,6 +141,7 @@ class MSHR(val bABits: Int, val tIWidth: Int, val WIdBits: Int, val NMshrEntry:I
 
   //  ******     missRsp status      ******
   val subentryStatusForRsp = Module(new getEntryStatusRsp(NMshrSubEntry))
+  val missRspprobeReqSameBlock = Wire(Bool())
 
   //  ******     missReq decide MSHR is full or not     ******
   val entryStatus = Module(new getEntryStatusReq(NMshrEntry))
@@ -176,6 +177,7 @@ class MSHR(val bABits: Int, val tIWidth: Int, val WIdBits: Int, val NMshrEntry:I
     missRspOutAsid_st1.io.enq.valid := io.missRspIn.valid && !(subentryStatusForRsp.io.used===0.U)
     missRspOutAsid_st1.io.deq.ready := io.missRspOut.ready
     io.missRspOutAsid.foreach(_ := missRspOutAsid_st1.io.deq.bits)
+    missRspprobeReqSameBlock := (io.probe.bits.blockAddr === io.missRspOut.bits.blockAddr) && (io.probeAsid.get === io.missRspOutAsid.get)
   } else {
     entryMatchProbe := Reverse(Cat(blockAddr_Access.map(_ === io.probe.bits.blockAddr))) & entry_valid
     when(io.missReq.fire && MSHR_st1.io.deq.ready && mshrStatus_st1_w === 0.U) { //PRIMARY_AVAIL
@@ -183,6 +185,7 @@ class MSHR(val bABits: Int, val tIWidth: Int, val WIdBits: Int, val NMshrEntry:I
       instrId_Access(entryStatus.io.next) := io.missReq.bits.instrId
     }
     entryMatchProbeid_reg := OHToUInt(Reverse(Cat(blockAddr_Access.map(_ === io.missReq.bits.blockAddr))) & entry_valid)
+    missRspprobeReqSameBlock := (io.probe.bits.blockAddr === io.missRspOut.bits.blockAddr)
   }
 
   assert(PopCount(entryMatchProbe) <= 1.U)
@@ -249,6 +252,8 @@ class MSHR(val bABits: Int, val tIWidth: Int, val WIdBits: Int, val NMshrEntry:I
       mshrStatus_st0 := 3.U //SECONDARY_FULL
       //}.elsewhen(subEntryAlmFull) {
       //  mshrStatus_st1 := 7.U //SECONDARY_ALM_FULL
+    }.elsewhen(missRspprobeReqSameBlock && io.missRspOut.valid){
+      mshrStatus_st0 := 4.U // miss rsp return
     }.otherwise {
       mshrStatus_st0 := 2.U //SECONDARY_AVAIL
     }
