@@ -207,16 +207,16 @@ class AsidTests extends AnyFreeSpec with ChiselScalatestTester {
         
         if(ptbr_table(ptbr_pos) == -1){
           ptbr_table(ptbr_pos) = mem.createRootPageTable()
-          c.io.asid_fill.valid.poke(true.B)
+          c.io.asid_fill.get.valid.poke(true.B)
           print(s"[DEBUG-MEM] 创建新的根页表: ASID = ${ptbr_pos}, PTBR = ${ptbr_table(ptbr_pos)}\n")
-          c.io.asid_fill.bits.poke((new AsidLookupEntry(mmu.SV32)).Lit(
+          c.io.asid_fill.get.bits.poke((new AsidLookupEntry(mmu.SV32)).Lit(
             _.ptbr -> ptbr_table(ptbr_pos).U,
             _.asid -> ptbr_pos.U,
             _.valid -> true.B
           ))
         }
         else{ 
-          c.io.asid_fill.valid.poke(false.B)
+          c.io.asid_fill.get.valid.poke(false.B)
           print(s"[DEBUG-MEM] 使用已存在的页表: ASID = ${ptbr_pos}, PTBR = ${ptbr_table(ptbr_pos)}\n")
         }
 
@@ -250,7 +250,7 @@ class AsidTests extends AnyFreeSpec with ChiselScalatestTester {
         timestamp = clock_cnt
         host_driver.timestamp = timestamp
       }
-      else c.io.asid_fill.valid.poke(false.B)
+      else c.io.asid_fill.get.valid.poke(false.B)
 
       if(ptbr_pos >= 255) throw AsidException
 

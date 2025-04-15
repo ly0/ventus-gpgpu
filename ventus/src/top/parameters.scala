@@ -111,8 +111,8 @@ object parameters { //notice log2Ceil(4) returns 2.that is ,n is the total num, 
   def l2cache_cache = CacheParameters(2, l2cache_NWays, l2cache_NSets, num_l2cache, l2cache_BlockWords << 2, l2cache_BlockWords << 2)
   def l2cache_micro = InclusiveCacheMicroParameters(l2cache_writeBytes, l2cache_memCycles, l2cache_portFactor, num_warp, num_sm, num_sm_in_cluster, num_cluster,dcache_MshrEntry,dcache_NSets)
   def l2cache_micro_l = InclusiveCacheMicroParameters(l2cache_writeBytes, l2cache_memCycles, l2cache_portFactor, num_warp, num_sm, num_sm_in_cluster, 1,dcache_MshrEntry,dcache_NSets)
-  def l2cache_params = InclusiveCacheParameters_lite(l2cache_cache, l2cache_micro, false)
-  def l2cache_params_l = InclusiveCacheParameters_lite(l2cache_cache, l2cache_micro_l, false)
+  def l2cache_params = InclusiveCacheParameters_lite(l2cache_cache, l2cache_micro, false, MMU_ENABLED)
+  def l2cache_params_l = InclusiveCacheParameters_lite(l2cache_cache, l2cache_micro_l, false, MMU_ENABLED)
 
   def tc_dim: Seq[Int] = {
     var x: Seq[Int] = Seq(2, 2, 2)

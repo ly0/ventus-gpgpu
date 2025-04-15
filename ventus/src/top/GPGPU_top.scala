@@ -155,7 +155,7 @@ class GPGPU_top(implicit p: Parameters, FakeCache: Boolean = false, SV: Option[m
     val inst_cnt = if(INST_CNT) Some(Output(Vec(NSms, UInt(32.W)))) else None
     val inst_cnt2 = if(INST_CNT_2) Some(Output(Vec(NSms, Vec(2, UInt(32.W))))) else None
     val cycle_cnt = Input(UInt(20.W))
-    val asid_fill = if(SV.nonEmpty) Some(Input(Flipped(ValidIO(new mmu.AsidLookupEntry(SV.get))))) else None
+    val asid_fill = if(MMU_ENABLED) Some(Input(Flipped(ValidIO(new mmu.AsidLookupEntry(SV.get))))) else None
   })
   val cta = Module(new CTAinterface)
   val sm_wrapper=VecInit((0 until NSms).map(i => Module(new SM_wrapper(FakeCache, i, SV)).io))
@@ -192,8 +192,8 @@ class GPGPU_top(implicit p: Parameters, FakeCache: Boolean = false, SV: Option[m
   //  sm2L2Arb.io.memReqVecIn(i) <> sm_wrapper(i).memReq
   }
 
-  SV match {
-    case None => {
+  MMU_ENABLED match {
+    case false => {
       for(i <- 0 until NL2Cache){
         l2cache(i).in_a <> cluster2l2Arb(i).memReqOut
         cluster2l2Arb(i).memRspIn <> l2cache(i).in_d
@@ -206,19 +206,19 @@ class GPGPU_top(implicit p: Parameters, FakeCache: Boolean = false, SV: Option[m
         io.out_a(i) <> l2cache(i).out_a
         l2cache(i).out_d <> io.out_d(i)
       }
-      sm_wrapper.foreach{ sm =>
-        sm.l2tlbReq.foreach{ l2 =>
+     /* sm_wrapper.foreach{ sm =>
+        sm.l2tlbReq.get.foreach{ l2 =>
           l2.ready := false.B
         }
-        sm.l2tlbRsp.foreach{ l2 =>
+        sm.l2tlbRsp.get.foreach{ l2 =>
           l2.valid := false.B
           l2.bits := 0.U.asTypeOf(l2.bits)
         }
-      }
+      }*/
     }
-    case Some(sv) => {
-      val l2tlb = Module(new L2TLB(sv, L2C = Some(l2cache_params))(Some(this.asInstanceOf[HasRVGParameters])))
-      val asid_lookup = Module(new AsidLookup(sv, l2tlb.nBanks, 8)) // TODO: parameter of max ASID entries
+    case true => {
+      val l2tlb = Module(new L2TLB(SV.get, L2C = Some(l2cache_params))(Some(this.asInstanceOf[HasRVGParameters])))
+      val asid_lookup = Module(new AsidLookup(SV.get, l2tlb.nBanks, 8)) // TODO: parameter of max ASID entries
       asid_lookup.io.lookup_req := l2tlb.io.asid_req
       l2tlb.io.ptbr_rsp := asid_lookup.io.lookup_rsp
       io.asid_fill.foreach{ in =>
@@ -231,12 +231,12 @@ class GPGPU_top(implicit p: Parameters, FakeCache: Boolean = false, SV: Option[m
     l2tlb.io.invalidate.bits := asid_invalid  // ASID 值，要清空指定地址空间的条目
 
       // sm <-> l2tlb
-      val sm_tlb_xbar = Module(new L1ToL2TlbXBar(sv, NSms * NCacheInSM)(Some(this)))
+      val sm_tlb_xbar = Module(new L1ToL2TlbXBar(SV.get, NSms * NCacheInSM)(Some(this)))
       l2tlb.io.in <> sm_tlb_xbar.io.req_l2
       sm_tlb_xbar.io.rsp_l2 <> l2tlb.io.out
 
       def genXbarReq(in: DecoupledIO[Bundle{val asid: UInt; val vpn: UInt}], index: UInt): DecoupledIO[L2TlbReq] = {
-        val out = Wire(DecoupledIO(new L2TlbReq(sv)(Some(this.asInstanceOf[HasRVGParameters]))))
+        val out = Wire(DecoupledIO(new L2TlbReq(SV.get)(Some(this.asInstanceOf[HasRVGParameters]))))
         out.bits.asid := in.bits.asid
         out.bits.vpn := in.bits.vpn
         out.bits.id := index
@@ -246,7 +246,7 @@ class GPGPU_top(implicit p: Parameters, FakeCache: Boolean = false, SV: Option[m
       }
       def genXbarRsp(in: DecoupledIO[L2TlbRsp]): DecoupledIO[Bundle{val ppn: UInt; val flags: UInt}] = {
         val out = Wire(DecoupledIO(new Bundle{
-          val ppn = UInt(sv.ppnLen.W)
+          val ppn = UInt(SV.get.ppnLen.W)
           val flags = UInt(8.W)
         }))
         out.bits.ppn := in.bits.ppn
@@ -256,16 +256,16 @@ class GPGPU_top(implicit p: Parameters, FakeCache: Boolean = false, SV: Option[m
         out
       }
       for(i <- 0 until NSms){
-        sm_tlb_xbar.io.req_l1(i * NCacheInSM) <> genXbarReq(sm_wrapper(i).l2tlbReq(0), (i * NCacheInSM).U)
-        sm_wrapper(i).l2tlbRsp(0) <> genXbarRsp(sm_tlb_xbar.io.rsp_l1(i * NCacheInSM))
-        sm_tlb_xbar.io.req_l1(i * NCacheInSM + 1) <> genXbarReq(sm_wrapper(i).l2tlbReq(1), (i * NCacheInSM + 1).U)
-        sm_wrapper(i).l2tlbRsp(1) <> genXbarRsp(sm_tlb_xbar.io.rsp_l1(i * NCacheInSM + 1))
+        sm_tlb_xbar.io.req_l1(i * NCacheInSM) <> genXbarReq(sm_wrapper(i).l2tlbReq.get(0), (i * NCacheInSM).U)
+        sm_wrapper(i).l2tlbRsp.get(0) <> genXbarRsp(sm_tlb_xbar.io.rsp_l1(i * NCacheInSM))
+        sm_tlb_xbar.io.req_l1(i * NCacheInSM + 1) <> genXbarReq(sm_wrapper(i).l2tlbReq.get(1), (i * NCacheInSM + 1).U)
+        sm_wrapper(i).l2tlbRsp.get(1) <> genXbarRsp(sm_tlb_xbar.io.rsp_l1(i * NCacheInSM + 1))
       }
 
       // l2tlb <-> l2c
       val tlb_req_arb = Seq.fill(NL2Cache)(Module(new Arbiter(new TLBundleA_lite(l2cache_params), 2)))
 
-      val tlb_l2c_xbar = Module(new L2TlbToL2CacheXBar(sv, NL2Cache, l2cache_params)(this.asInstanceOf[HasRVGParameters]))
+      val tlb_l2c_xbar = Module(new L2TlbToL2CacheXBar(SV.get, NL2Cache, l2cache_params)(this.asInstanceOf[HasRVGParameters]))
 
       tlb_l2c_xbar.io.req_tlb <> l2tlb.io.mem_req
       (0 until l2tlb.nBanks).foreach{ i =>
@@ -330,14 +330,14 @@ class SM_wrapper(FakeCache: Boolean = false, sm_id: Int = 0, SV: Option[mmu.SVPa
     val memReq = DecoupledIO(new L1CacheMemReq)
     val inst = if (SINGLE_INST) Some(Flipped(DecoupledIO(UInt(32.W)))) else None
     val inst_cnt = if(INST_CNT) Some(Output(UInt(32.W))) else if(INST_CNT_2) Some(Output(Vec(2, UInt(32.W)))) else None
-    val l2tlbReq = Vec(num_cache_in_sm, DecoupledIO(new Bundle{
+    val l2tlbReq = if(MMU_ENABLED) Some(Vec(num_cache_in_sm, DecoupledIO(new Bundle{
       val asid = UInt(SV.getOrElse(mmu.SV32).asidLen.W)
       val vpn = UInt(SV.getOrElse(mmu.SV32).vpnLen.W)
-    }))
-    val l2tlbRsp = Flipped(Vec(num_cache_in_sm, DecoupledIO(new Bundle{
+    }))) else None
+    val l2tlbRsp = if(MMU_ENABLED) Some(Flipped(Vec(num_cache_in_sm, DecoupledIO(new Bundle{
       val ppn = UInt(SV.getOrElse(mmu.SV32).ppnLen.W)
       val flags = UInt(8.W)
-    })))
+    })))) else None
     //val inst_cnt = if(INST_CNT) Some(Output(UInt(32.W))) else None
     val inst_cnt2 = if(INST_CNT_2) Some(Output(Vec(2, UInt(32.W)))) else None
   })
@@ -368,16 +368,16 @@ class SM_wrapper(FakeCache: Boolean = false, sm_id: Int = 0, SV: Option[mmu.SVPa
   l1Cache2L2Arb.io.memRspVecOut(0).ready := icache.io.memRsp.ready
   // ***********************
   // **** icache memReq ****
-  l1Cache2L2Arb.io.memReqVecIn(0).valid := icache.io.memReq.valid
-  l1Cache2L2Arb.io.memReqVecIn(0).bits.a_opcode := 4.U(3.W)
+  l1Cache2L2Arb.io.memReqVecIn.get(0).valid := icache.io.memReq.valid
+  l1Cache2L2Arb.io.memReqVecIn.get(0).bits.a_opcode := 4.U(3.W)
   //TODO changed to TLAOp_Get when L1param system established
-  l1Cache2L2Arb.io.memReqVecIn(0).bits.a_addr := icache.io.memReq.bits.a_addr
-  l1Cache2L2Arb.io.memReqVecIn(0).bits.a_source := icache.io.memReq.bits.a_source
-  l1Cache2L2Arb.io.memReqVecIn(0).bits.a_data := 0.U.asTypeOf(Vec(dcache_BlockWords, UInt(xLen.W)))
-  l1Cache2L2Arb.io.memReqVecIn(0).bits.a_mask.foreach{_ := true.B}
-  l1Cache2L2Arb.io.memReqVecIn(0).bits.a_param := DontCare
-  l1Cache2L2Arb.io.memReqVecIn(0).bits.spike_info.foreach { left => left := icache.io.memReq.bits.spike_info.getOrElse(0.U.asTypeOf(new cache_spike_info(mmu.SV32))) }
-  icache.io.memReq.ready := l1Cache2L2Arb.io.memReqVecIn(0).ready
+  l1Cache2L2Arb.io.memReqVecIn.get(0).bits.a_addr.get := icache.io.memReq.bits.a_addr.get
+  l1Cache2L2Arb.io.memReqVecIn.get(0).bits.a_source := icache.io.memReq.bits.a_source
+  l1Cache2L2Arb.io.memReqVecIn.get(0).bits.a_data := 0.U.asTypeOf(Vec(dcache_BlockWords, UInt(xLen.W)))
+  l1Cache2L2Arb.io.memReqVecIn.get(0).bits.a_mask.foreach{_ := true.B}
+  l1Cache2L2Arb.io.memReqVecIn.get(0).bits.a_param := DontCare
+  l1Cache2L2Arb.io.memReqVecIn.get(0).bits.spike_info.foreach { left => left := icache.io.memReq.bits.spike_info.getOrElse(0.U.asTypeOf(new cache_spike_info(mmu.SV32))) }
+  icache.io.memReq.ready := l1Cache2L2Arb.io.memReqVecIn.get(0).ready
   // ***********************
   // **** icache coreReq ****
   pipe.io.icache_req.ready:=icache.io.coreReq.ready
@@ -385,7 +385,10 @@ class SM_wrapper(FakeCache: Boolean = false, sm_id: Int = 0, SV: Option[mmu.SVPa
   icache.io.coreReq.bits.addr:=pipe.io.icache_req.bits.addr
   icache.io.coreReq.bits.warpid:=pipe.io.icache_req.bits.warpid
   icache.io.coreReq.bits.mask:=pipe.io.icache_req.bits.mask
-  icache.io.coreReq.bits.asid:=pipe.io.icache_req.bits.asid
+  if(MMU_ENABLED){
+    icache.io.coreReq.bits.asid.get := pipe.io.icache_req.bits.asid.get
+  }
+
   icache.io.coreReq.bits.spike_info.foreach( _ := DontCare )
   // ***********************
   // **** icache coreRsp ****
@@ -410,7 +413,7 @@ class SM_wrapper(FakeCache: Boolean = false, sm_id: Int = 0, SV: Option[mmu.SVPa
   l1Cache2L2Arb.io.memRspVecOut(1).ready := dcache.io.memRsp.ready
   // ***********************
   // **** dcache memReq ****
-  l1Cache2L2Arb.io.memReqVecIn(1) <> dcache.io.memReq
+  l1Cache2L2Arb.io.memReqVecIn.get(1) <> dcache.io.memReq.get
   // **** dcache coreReq ****
   dcache.io.coreReq <> pipe.io.dcache_req
   // **** dcache coreRsp ****
@@ -422,15 +425,19 @@ class SM_wrapper(FakeCache: Boolean = false, sm_id: Int = 0, SV: Option[mmu.SVPa
   dcache.io.coreRsp.ready:=pipe.io.dcache_rsp.ready
 
   assert(num_cache_in_sm == 2, "Now only support 2 L1 Caches(one L1I and one L1D) in a single SM")
-
-  val l1tlb: Seq[mmu.L1TlbIO] = SV match{
+if(MMU_ENABLED) {
+  val l1tlb: Seq[mmu.L1TlbIO] = SV match {
     case Some(sv) => Seq.fill(num_cache_in_sm)(Module(new L1TLB(sv, l1tlb_ways, Debug = true)))
     case None => Seq.fill(num_cache_in_sm)(Module(new L1TlbAutoReflect(mmu.SV32)))
   }
   // l1tlb <-> l2tlb
   SV match {
     case Some(sv) => {
-      (l1tlb zip (io.l2tlbReq zip io.l2tlbRsp)).foreach { case (l1, (l2req, l2rsp)) =>
+     // l1tlb(0).io.l2_req <> io.l2tlbReq.get(0)
+     // l1tlb(1).io.l2_req <> io.l2tlbReq.get(1)
+     // l1tlb(0).io.l2_rsp <> io.l2tlbRsp.get(0)
+     // l1tlb(1).io.l2_rsp <> io.l2tlbRsp.get(1)
+      (l1tlb zip (io.l2tlbReq.get zip io.l2tlbRsp.get)).foreach { case (l1, (l2req, l2rsp)) =>
         l2req <> l1.io.l2_req
         l1.io.l2_rsp <> l2rsp
         // TODO: FIX
@@ -438,24 +445,33 @@ class SM_wrapper(FakeCache: Boolean = false, sm_id: Int = 0, SV: Option[mmu.SVPa
       }
     }
     case None => {
-      l1tlb.foreach{ l1 =>
+      l1tlb.foreach { l1 =>
         l1.io.l2_req <> DontCare
         l1.io.l2_rsp <> DontCare
         l1.io.invalidate := 0.U.asTypeOf(l1.io.invalidate)
       }
-      io.l2tlbReq.foreach{ l2 =>
+      io.l2tlbReq.get.foreach { l2 =>
         l2 <> DontCare
       }
-      io.l2tlbRsp.foreach{ l2 =>
+      io.l2tlbRsp.get.foreach { l2 =>
         l2 <> DontCare
       }
     }
   }
   // l1i/l1d <-> l1itlb/l1dtlb
-  l1tlb(0).io.in <> icache.io.TLBReq
-  icache.io.TLBRsp <> l1tlb(0).io.out
-  l1tlb(1).io.in <> dcache.io.TLBReq
-  dcache.io.TLBRsp <> l1tlb(1).io.out
+  SV match {
+    case Some(sv) => {
+      l1tlb(0).io.in <> icache.io.TLBReq.get
+      icache.io.TLBRsp.get <> l1tlb(0).io.out
+      l1tlb(1).io.in <> dcache.io.TLBReq.get
+      dcache.io.TLBRsp.get <> l1tlb(1).io.out
+    }
+    case None => {
+
+    }
+  }
+}
+
 
   val sharedmem = Module(new SharedMemory()(param))
   sharedmem.io.coreReq.bits.data:=pipe.io.shared_req.bits.data
@@ -497,7 +513,7 @@ class SM2clusterArbiter(L2param: InclusiveCacheParameters_lite)(implicit p: Para
     else {
       memReqArb.io.in(i).bits.source := Cat(i.asUInt,io.memReqVecIn(i).bits.a_source)
     }
-    memReqArb.io.in(i).bits.address := io.memReqVecIn(i).bits.a_addr
+    memReqArb.io.in(i).bits.address := io.memReqVecIn(i).bits.a_addr.get
     memReqArb.io.in(i).bits.mask := (io.memReqVecIn(i).bits.a_mask).asUInt
     memReqArb.io.in(i).bits.data := io.memReqVecIn(i).bits.a_data.asUInt
     memReqArb.io.in(i).bits.size := 0.U//log2Up(BlockWords*BytesOfWord).U

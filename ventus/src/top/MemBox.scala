@@ -32,11 +32,12 @@ class MetaData{
   var buffer_size = new Array[BigInt](0)
   // var lds_mem_base = new Array[BigInt](0)
   // var lds_mem_size = new Array[BigInt](0)
-    var lds_mem_index = new Array[Int](0)
+  var lds_mem_index = new Array[Int](0)
+  var buffer_allocsize = new Array[BigInt](0)
 
   def generateHostReq(i: BigInt, j: BigInt, k: BigInt, asid: BigInt) = {
     val blockID = (i * kernel_size(1) + j) * kernel_size(2) + k
-    (new host2CTA_data).Lit(
+    val hostReq = (new host2CTA_data).Lit(
       _.host_kernel_asid -> asid.U,
       //_.host_wg_id -> ("b" + blockID.toString(2) + "0" * CU_ID_WIDTH).U,
       _.host_wg_id -> blockID.U,
@@ -56,6 +57,7 @@ class MetaData{
       _.host_pds_size_per_wf -> 0.U,
       _.host_asid -> asid.U
     )
+    hostReq
   }
 }
 
@@ -95,6 +97,10 @@ object MetaData{
         //   lds_mem_size = lds_mem_size :+ parsed
         // else
         buffer_size = buffer_size :+ parsed
+      }
+      for (i <- 0 until num_buffer.toInt) {
+        val parsed = parseHex(buf, 64)
+        buffer_allocsize = buffer_allocsize :+ parsed
       }
     }
   }
@@ -162,26 +168,32 @@ class MemBox[T <: BaseSV](SV: T) extends Memory(SV.MaxPhyRange, SV) {
   def loadfile(ptbr: BigInt, metaData: MetaData, datafile: String): MetaData = {
     val file = Source.fromFile(datafile)
     var fileBytes = file.getLines().map(Hex2ByteArray(_, 4)).reduce(_ ++ _)
+   // println("#####function loadfile#######")
     // Temporary fix
     tryAllocate(ptbr, BigInt("070000000", 16), 8 * SV.PageSize)
+    //println(s"totally ${metaData.buffer_base.last} allocation")
     for (i <- metaData.buffer_base.indices) {
       val lower = metaData.buffer_base(i)
       // Temporary fix
       val real_size = if(lower == BigInt("080000000", 16)) 8 * SV.PageSize else metaData.buffer_size(i).toInt // 软件工具链给0x80000000的buffer size太大了，所以暂时固定一个小的值
+      val alloc_size = if(lower == BigInt("080000000", 16)) 8 * SV.PageSize else metaData.buffer_allocsize(i).toInt  //Actual allocated size (in bytes) of each buffer 
       val upper = lower + real_size - (lower + real_size) % SV.PageSize
-
-      if(real_size > 0){
+      //println(s"+++++${i} indices, real size is ${real_size}, meta Data buffersize is ${metaData.buffer_size(i).toInt}")
+      if(alloc_size > 0){
         if (metaData.lds_mem_index.contains(i)) { // dynamic
-          tryAllocate(ptbr, lower, real_size)
+          tryAllocate(ptbr, lower, alloc_size)
           writeDataVirtual(ptbr, lower, metaData.buffer_size(i).toInt, fileBytes.take(metaData.buffer_size(i).toInt))
         }
         else { // static
-          val alloc_pa = allocateMemory(ptbr, lower, real_size)
+          val alloc_pa = allocateMemory(ptbr, lower, alloc_size)
+         // println(f"allocate memory at allc_pa: 0x$alloc_pa%x ")
           writeDataPhysical(alloc_pa, real_size, fileBytes.take(real_size))
         }
       }
       fileBytes = fileBytes.drop(metaData.buffer_size(i).toInt)
     }
+//    println(s"kernel id: ${metaData.kernel_id}, wf size: ${metaData.wf_size}")
+//    println(s"kernelsize 0:${metaData.kernel_size(0)}, size 1:${metaData.kernel_size(1)},size2:${metaData.kernel_size(2)} ")
     metaData
   }
 }
