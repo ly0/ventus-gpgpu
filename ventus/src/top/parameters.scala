@@ -7,10 +7,10 @@ object parameters { //notice log2Ceil(4) returns 2.that is ,n is the total num, 
   def num_sm = 2
   val SINGLE_INST: Boolean = false
   val SPIKE_OUTPUT: Boolean = true
-  val INST_CNT: Boolean = false
-  val INST_CNT_2: Boolean = true
-  val MMU_ENABLED: Boolean = false
-  def MMU_ASID_WIDTH = 16
+  val INST_CNT: Boolean = true
+  val INST_CNT_2: Boolean = false
+  val MMU_ENABLED: Boolean = true
+  def MMU_ASID_WIDTH = mmu.SV32.asidLen
   val wid_to_check = 2
   def num_bank = 4                  // # of banks for register file
   def num_collectorUnit = num_warp
@@ -114,8 +114,8 @@ object parameters { //notice log2Ceil(4) returns 2.that is ,n is the total num, 
   def l2cache_cache = CacheParameters(2, l2cache_NWays, l2cache_NSets, num_l2cache, l2cache_BlockWords << 2, l2cache_BlockWords << 2)
   def l2cache_micro = InclusiveCacheMicroParameters(l2cache_writeBytes, l2cache_memCycles, l2cache_portFactor, num_warp, num_sm, num_sm_in_cluster, num_cluster,dcache_MshrEntry,dcache_NSets)
   def l2cache_micro_l = InclusiveCacheMicroParameters(l2cache_writeBytes, l2cache_memCycles, l2cache_portFactor, num_warp, num_sm, num_sm_in_cluster, 1,dcache_MshrEntry,dcache_NSets)
-  def l2cache_params = InclusiveCacheParameters_lite(l2cache_cache, l2cache_micro, false)
-  def l2cache_params_l = InclusiveCacheParameters_lite(l2cache_cache, l2cache_micro_l, false)
+  def l2cache_params = InclusiveCacheParameters_lite(l2cache_cache, l2cache_micro, false, MMU_ENABLED)
+  def l2cache_params_l = InclusiveCacheParameters_lite(l2cache_cache, l2cache_micro_l, false, MMU_ENABLED)
 
   def tc_dim: Seq[Int] = {
     var x: Seq[Int] = Seq(2, 2, 2)
@@ -131,6 +131,8 @@ object parameters { //notice log2Ceil(4) returns 2.that is ,n is the total num, 
   def num_cache_in_sm = 2
 
   def num_l2cache = 1
+
+  def l1tlb_ways = 8
 
   val LDS_BASE : BigInt = 0x70000000  // LDS base address: a hyperparameter used within each SM
 
@@ -157,6 +159,8 @@ object parameters { //notice log2Ceil(4) returns 2.that is ,n is the total num, 
   def WG_SIZE_X_WIDTH = log2Ceil(NUM_WG_X + 1)
   def WG_SIZE_Y_WIDTH = log2Ceil(NUM_WG_Y + 1)
   def WG_SIZE_Z_WIDTH = log2Ceil(NUM_WG_Z + 1)
+
+  def KNL_ASID_WIDTH = MMU_ASID_WIDTH
 
   object CTA_SCHE_CONFIG {
     import chisel3._
