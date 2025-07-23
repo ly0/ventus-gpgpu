@@ -27,6 +27,7 @@ import axi._
 import freechips.rocketchip.amba.axi4._
 import mmu.{AsidLookup, L1TLB, L1TlbAutoReflect, L1ToL2TlbXBar, L2TLB, L2TlbReq, L2TlbRsp, L2TlbToL2CacheXBar}
 import scala.Option.option2Iterable
+import gvm._
 
 class host2CTA_data extends Bundle{
   val host_wg_id            = UInt(CTA_SCHE_CONFIG.WG.WG_ID_WIDTH)
@@ -489,6 +490,19 @@ if(MMU_ENABLED) {
   pipe.io.shared_rsp.bits.instrId:=sharedmem.io.coreRsp.bits.instrId
   pipe.io.shared_rsp.bits.activeMask:=sharedmem.io.coreRsp.bits.activeMask
   // pipe.io.shared_rsp.bits.isWrite:=sharedmem.io.coreRsp.bits.isWrite
+  
+  if(GVM_ENABLED){
+    val gvm_cta2warp = Module(new GvmDutCta2Warp)
+    // CTA 调度器向 SM 分配 warp 时，获取寄存器起始地址
+    gvm_cta2warp.io.clock := clock
+    gvm_cta2warp.io.warp_req_fire := cta2warp.io.warpReq.fire
+    gvm_cta2warp.io.software_wg_id := cta2warp.io.warpReq.bits.CTAdata.dispatch2cu_wg_id.pad(32)
+    gvm_cta2warp.io.software_warp_id := cta2warp.io.warpReq.bits.CTAdata.dispatch2cu_wf_tag_dispatch(WF_COUNT_WIDTH_PER_WG-1,0).pad(32)
+    gvm_cta2warp.io.sm_id := sm_id.U(32.W)
+    gvm_cta2warp.io.hardware_warp_id := cta2warp.io.warpReq.bits.wid.pad(32)
+    gvm_cta2warp.io.sgpr_base := cta2warp.io.warpReq.bits.CTAdata.dispatch2cu_sgpr_base_dispatch.pad(32)
+    gvm_cta2warp.io.vgpr_base := cta2warp.io.warpReq.bits.CTAdata.dispatch2cu_vgpr_base_dispatch.pad(32)
+  }
 }
 
 
