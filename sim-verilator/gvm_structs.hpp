@@ -85,7 +85,6 @@ struct retireInfo_t {
     uint32_t software_wg_id;
     uint32_t software_warp_id;
     uint32_t retire_cnt;
-    uint32_t extended_cnt; // 记录 extended 指令的数量
   };
   std::vector<retire_cnt_item_t> warp_retire_cnt;
 };

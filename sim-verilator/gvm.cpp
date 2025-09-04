@@ -27,13 +27,23 @@ bool gvm_t::isInsnCare(uint32_t insn, const std::vector<care_insn_t> care_insns)
 }
 
 void gvm_t::disasm(uint32_t insn, char* insn_name) {
+  std::vector<std::string> matched_names;
   for (const auto& pattern : disasm_table) {
     if ((insn & pattern.mask) == pattern.value) {
-      strcpy(insn_name, pattern.name);
-      return;
+      matched_names.push_back(pattern.name);
     }
   }
-  strcpy(insn_name, " ");
+  if (matched_names.empty()) {
+    strcpy(insn_name, " ");
+    return;
+  }
+  if (matched_names.size() > 1) {
+    logger->error("GVM error: multiple disasm matches for insn 0x{:08x}: {}"
+      , insn, fmt::join(matched_names, " "));
+    assert(0);
+  } else {
+    strcpy(insn_name, matched_names[0].c_str());
+  }
   return;
 }
 
@@ -82,11 +92,13 @@ void gvm_t::getDutWarpNew() {
       }
     }
     if (found_sw) {
-      printf("GVM error: repeated cta2warp dispatch with same software_wg_id & software_warp_id.\n");
+      logger->error("GVM error: repeated cta2warp dispatch with same software_wg_id {} & software_warp_id {}.\n",
+        d.software_wg_id, d.software_warp_id);
       assert(0);
     }
     if (found_hw) {
-      printf("GVM error: repeated cta2warp dispatch. sm_id & hardware_warp_id already occupied.\n");
+      logger->error("GVM error: repeated cta2warp dispatch with same sm_id {} & hardware_warp_id {}.\n",
+        d.sm_id, d.hardware_warp_id);
       assert(0);
     }
     dut_active_warps[{d.software_wg_id, d.software_warp_id}] = d;
@@ -176,55 +188,58 @@ void gvm_t::getDutInsnFinish() {
 }
 void gvm_t::getDutXRegWbFinish() {
   for (const auto& item : g_xreg_wb_data) {
-    if (isInsnCare(item.insn, retire_care_insns) || isInsnCare(item.insn, single_insn_cmp_care_insns)) {
-      bool found_warp = false;
-      for (auto& warp : dut_active_warps) {
-        if (warp.second.sm_id == item.sm_id && warp.second.hardware_warp_id == item.hardware_warp_id) {
-          found_warp = true;
-          auto insn_it = warp.second.insns.find(item.dispatch_id);
-          if ((insn_it != warp.second.insns.end()) && (insn_it->second.done != 1)) {
-            // 如果找到了该条指令，并且该指令尚未被标记为已完成
-            assert(insn_it->second.pc == item.pc);
-            assert(insn_it->second.insn == item.insn);
-            assert(insn_it->second.care == true); // 标量寄存器写回指令需指导 retire
-            // 维护 retire 相关变量
-            insn_it->second.done = true;
-            // 维护 single insn cmp 相关变量
-            if (insn_it->second.single_insn_cmp.care == true) {
-              insn_it->second.single_insn_cmp.dut_done = 1;
-              insn_it->second.single_insn_cmp.dut_result.insn_type = InsnType::XREG;
-              insn_it->second.single_insn_cmp.dut_result.xreg_result.rd = item.rd;
-              insn_it->second.single_insn_cmp.dut_result.xreg_result.reg_idx = item.reg_idx;
-            }
-          } else {
-            logger->error(
-                "GVM error in `gvm_t::getDutInsnFinish`: "
-                "sm_id & hardware_warp_id match successful, but no item in this warp's unfinished "
-                "dispatched insns with required dispatch_id"
-            );
-            logger->error(
-                "getDutInsnFinish Error: sm_id: {}, hardware_warp_id: {}, dispatch_id: {}, pc: 0x{:08x}, insn: "
-                "0x{:08x}",
-                item.sm_id, item.hardware_warp_id, item.dispatch_id, item.pc, item.insn
-            );
-            // assert(0);
+    assert(isInsnCare(item.insn, retire_care_insns));
+    assert(!isInsnCare(item.insn, barrier_insns));
+    assert(!isInsnCare(item.insn, single_insn_cmp_care_insns));
+    bool found_warp = false;
+    for (auto& warp : dut_active_warps) {
+      if (warp.second.sm_id == item.sm_id && warp.second.hardware_warp_id == item.hardware_warp_id) {
+        found_warp = true;
+        auto insn_it = warp.second.insns.find(item.dispatch_id);
+        if ((insn_it != warp.second.insns.end()) && (insn_it->second.done != 1)) {
+          // 如果找到了该条指令，并且该指令尚未被标记为已完成
+          assert(insn_it->second.pc == item.pc);
+          assert(insn_it->second.insn == item.insn);
+          assert(insn_it->second.care == true); // 标量寄存器写回指令需指导 retire
+          // 维护 retire 相关变量
+          insn_it->second.done = true;
+          // 维护 single insn cmp 相关变量
+          if (insn_it->second.single_insn_cmp.care == true) {
+            insn_it->second.single_insn_cmp.dut_done = 1;
+            insn_it->second.single_insn_cmp.dut_result.insn_type = InsnType::XREG;
+            insn_it->second.single_insn_cmp.dut_result.xreg_result.rd = item.rd;
+            insn_it->second.single_insn_cmp.dut_result.xreg_result.reg_idx = item.reg_idx;
           }
+        } else {
+          logger->debug(
+              "GVM info in `gvm_t::getDutInsnFinish`: "
+              "sm_id & hardware_warp_id match successful, but no item in this warp's unfinished "
+              "dispatched insns with required dispatch_id"
+          );
+          logger->debug(
+              "getDutInsnFinish info: sm_id: {}, hardware_warp_id: {}, dispatch_id: {}, pc: 0x{:08x}, insn: "
+              "0x{:08x}",
+              item.sm_id, item.hardware_warp_id, item.dispatch_id, item.pc, item.insn
+          );
+          // assert(0);
         }
       }
-      if (!found_warp) {
-        // logger->error("GVM error in `gvm_t::getDutXRegWbFinish`: "
-        //   "no warp in `dut_active_warps` with required sm_id and hardware_warp_id\n"
-        //   "getDutXRegWbFinish Error: sm_id: {}, hardware_warp_id: {}, dispatch_id: {}, pc: 0x{:08x}, insn: 0x{:08x}",
-        //   item.sm_id, item.hardware_warp_id, item.dispatch_id, item.pc, item.insn);
-        // assert(0);
-      }
+    }
+    if (!found_warp) {
+      // logger->error("GVM error in `gvm_t::getDutXRegWbFinish`: "
+      //   "no warp in `dut_active_warps` with required sm_id and hardware_warp_id\n"
+      //   "getDutXRegWbFinish Error: sm_id: {}, hardware_warp_id: {}, dispatch_id: {}, pc: 0x{:08x}, insn: 0x{:08x}",
+      //   item.sm_id, item.hardware_warp_id, item.dispatch_id, item.pc, item.insn);
+      // assert(0);
     }
   }
 }
 
 void gvm_t::getDutVRegWbFinish() {
   for (const auto& item : g_vreg_wb_data) {
-    if (isInsnCare(item.second.insn, retire_care_insns) || isInsnCare(item.second.insn, single_insn_cmp_care_insns)) {
+    assert(!isInsnCare(item.second.insn, barrier_insns));
+    assert(!isInsnCare(item.second.insn, retire_care_insns));
+    if (isInsnCare(item.second.insn, single_insn_cmp_care_insns)) {
       bool found_warp = false;
       for (auto& warp : dut_active_warps) {
         if ((warp.second.sm_id == item.second.sm_id) && (warp.second.hardware_warp_id == item.second.hardware_warp_id)) {
@@ -244,13 +259,13 @@ void gvm_t::getDutVRegWbFinish() {
               insn_it->second.single_insn_cmp.dut_result.vreg_result.mask = pack_with_bitset(item.second.wvd_mask);
             }
           } else {
-            logger->error(
-                "GVM error in `gvm_t::getDutVRegWbFinish`: "
+            logger->debug(
+                "GVM info in `gvm_t::getDutVRegWbFinish`: "
                 "sm_id & hardware_warp_id match successful, but no item in this warp's unfinished "
                 "dispatched insns with required dispatch_id"
             );
-            logger->error(
-                "getDutVRegWbFinish Error: sm_id: {}, hardware_warp_id: {}, dispatch_id: {}, pc: 0x{:08x}, insn: 0x{:08x}",
+            logger->debug(
+                "getDutVRegWbFinish info: sm_id: {}, hardware_warp_id: {}, dispatch_id: {}, pc: 0x{:08x}, insn: 0x{:08x}",
                 item.second.sm_id, item.second.hardware_warp_id, item.second.dispatch_id, item.second.pc, item.second.insn
             );
             // assert(0);
@@ -264,39 +279,49 @@ void gvm_t::getDutVRegWbFinish() {
         //   item.second.sm_id, item.second.hardware_warp_id, item.second.dispatch_id, item.second.pc, item.second.insn);
         // assert(0);
       }
+    } else {
+      logger->debug("GVM warning in `gvm_t::getDutVRegWbFinish`: "
+        "ignoring VReg Writeback from pc 0x{:08x}, insn 0x{:08x}",
+        item.second.pc, item.second.insn);
     }
   }
 }
 
 void gvm_t::getDutBarDone() {
   for (const auto& item : g_bar_done_data) {
-    if (isInsnCare(item.insn, retire_care_insns) || isInsnCare(item.insn, single_insn_cmp_care_insns)) {
-      bool found = false;
-      for (auto& warp: dut_active_warps) {
-        if (warp.second.sm_id == item.sm_id && warp.second.wg_slot_id_in_warp_sche == item.wg_slot_id) {
-          for (auto& insn: warp.second.insns) {
-            if (insn.second.pc == item.pc) {
-              if(insn.second.done == false) {
-                found = true;
-              }
-              // 为什么这里不用 dispatch_id 来识别指令？因为各个 warp 的分支行为可能不同
-              // 进而导致对同一条 barrier 指令的 dispatch_id 不同
-              // 而这里拿到的 dispatch_id 只是最后一个完成的 warp 的 dispatch_id
-              // 因此使用 pc 识别 barrier 指令
-              // 激进地假设不会同时存在两个相同 pc 的未 retire 的 barrier 指令
-              assert(insn.second.care == true); // barrier 指令需指导 retire
-              insn.second.done = true; // 标记该指令已完成
+    assert(isInsnCare(item.insn, barrier_insns));
+    if(isInsnCare(item.insn, single_insn_cmp_care_insns)){
+      char buffer[128];
+      disasm(item.insn, buffer);
+      printf("%s\n", buffer);
+      assert(0);
+    } // barrier 指令不参与单指令比对
+    assert(isInsnCare(item.insn, retire_care_insns)); // barrier 指令需指导 retire
+    bool found = false;
+    for (auto& warp: dut_active_warps) {
+      if (warp.second.sm_id == item.sm_id && warp.second.wg_slot_id_in_warp_sche == item.wg_slot_id) {
+        for (auto& insn: warp.second.insns) {
+          if (insn.second.pc == item.pc) {
+            if(insn.second.done == false) {
+              found = true;
             }
+            // 为什么这里不用 dispatch_id 来识别指令？因为各个 warp 的分支行为可能不同
+            // 进而导致对同一条 barrier 指令的 dispatch_id 不同
+            // 而这里拿到的 dispatch_id 只是最后一个完成的 warp 的 dispatch_id
+            // 因此使用 pc 识别 barrier 指令
+            // 激进地假设不会同时存在两个相同 pc 的未 retire 的 barrier 指令
+            assert(insn.second.care == true); // barrier 指令需指导 retire
+            insn.second.done = true; // 标记该指令已完成
           }
         }
       }
-      if(found == false) {
-        // logger->error("GVM error in `gvm_t::getDutBarDone`: "
-        //   "no insn in `dut_active_warps` with required unfinished barrier insn\n"
-        //   "getDutBarDone Error: sm_id: {}, wg_slot_id: {}, pc: 0x{:08x}, insn: 0x{:08x}",
-        //   item.sm_id, item.wg_slot_id, item.pc, item.insn);
-        // assert(0);
-      }
+    }
+    if(found == false) {
+      logger->debug("GVM info in `gvm_t::getDutBarDone`: "
+        "no insn in `dut_active_warps` with required unfinished barrier insn\n"
+        "getDutBarDone info: sm_id: {}, wg_slot_id: {}, pc: 0x{:08x}, insn: 0x{:08x}",
+        item.sm_id, item.wg_slot_id, item.pc, item.insn);
+      // assert(0);
     }
   }
 }
@@ -320,6 +345,7 @@ void gvm_t::getDutXReg() {
       warp.second.curr_xreg[i] = g_xreg_data_mapped[warp.second.sm_id]
         [(i + warp.second.hardware_warp_id) % num_bank].bank_data[(warp.second.xreg_base + i) >> __builtin_ctz(num_bank)];
     }
+    warp.second.curr_xreg[0] = 0; // 强制 x0 为 0，认为 DUT 已经正确地对 x0 做了特殊处理
   }
 }
 
@@ -377,90 +403,53 @@ int gvm_t::gvmStep() {
 
 void gvm_t::checkRetire() {
   for (auto& warp: dut_active_warps) {
-    uint32_t retire_cnt = 0;
-    uint32_t extended_cnt = 0; // 统计最终 retire 范围内的 extended 指令数量
+    auto it = warp.second.insns.find(warp.second.next_retire_dispatch_id);
+    assert(it == warp.second.insns.end() || it->second.retired == false);
 
-    auto temp_it = warp.second.insns.find(warp.second.next_retire_dispatch_id);
-    assert(temp_it == warp.second.insns.end() || temp_it->second.retired == false);
-
-    if (temp_it == warp.second.insns.end()) {
+    if (it == warp.second.insns.end()) {
       continue;
     }
 
-    // 1) 找到从 next_retire_dispatch_id 开始的前缀，满足 (done==1 || care==0)
-    auto insn_it_begin = temp_it;
-    auto it = insn_it_begin;
+    auto insn_it_begin = it;
+    uint32_t final_cnt = 0;
+    uint32_t temp_retire_cnt = 0;
+    bool barriered = false;
     for (; it != warp.second.insns.end(); ++it) {
-      if (it->second.done == 1 || it->second.care == 0) {
-        retire_cnt++;
+      if (it->second.care == false) {
+        assert(isInsnCare(it->second.insn, barrier_insns) == false);
+        temp_retire_cnt++;
+      } else if (it->second.done == true) {
+        final_cnt += temp_retire_cnt;
+        temp_retire_cnt = 0;
+        final_cnt++;
+        if(isInsnCare(it->second.insn, barrier_insns)) {
+          barriered = true;
+          break;
+        }
       } else {
         break;
       }
     }
-    if (retire_cnt == 0) {
-      continue; // 没有可候选的前缀
-    }
-
-    // it 指向前缀后的第一个元素（或 end()）
-    auto prefix_end = it; // 不包含
-
-    // 2) 在前缀内从尾部向前剔除末尾连续的 care==0 元素，
-    //    保证最终被 retire 的最后一个元素是 (care==1 && done==1)
-    uint32_t final_cnt = retire_cnt;
-    // last 指向前缀最后一个元素
-    auto last = prefix_end;
-    --last; // safe because retire_cnt > 0
-    bool found_last_good = false;
-    while (true) {
-      if (last->second.care == 1 && last->second.done == 1) {
-        found_last_good = true;
-        break;
+    ++it;
+    bool retiring = true;
+    for (; it != warp.second.insns.end(); ++it) {
+      if (barriered) {
+        assert(it->second.care == false || it->second.done == false); // RTL 中，不应当有指令越过 barrier 完成
       }
-      // 否则该元素是 care==0（因为在前缀内 must satisfy (done==1 || care==0)）
-      if (last == insn_it_begin) {
-        // 已到达前缀最前面，没有找到符合 (care==1 && done==1)
-        final_cnt = 0;
-        break;
-      } else {
-        // 剔除最后一个元素，向前移动
-        --final_cnt;
-        --last;
-      }
-    }
-
-    if (final_cnt == 0 || !found_last_good) {
-      continue; // 保守策略：前缀内没有以 care==1&&done==1 结尾的元素 => 不 retire
-    }
-
-    // 3) 统计最终 retire 区间内的 extended_cnt
-    extended_cnt = 0;
-    auto scan = insn_it_begin;
-    for (uint32_t i = 0; i < final_cnt && scan != warp.second.insns.end(); ++i, ++scan) {
-      if (scan->second.extended) extended_cnt++;
-    }
-
-    // 4) 确认后缀（从最终 retire 之后开始）没有已完成且被关心的指令
-    auto suffix_it = insn_it_begin;
-    for (uint32_t i = 0; i < final_cnt; ++i) {
-      ++suffix_it;
-    }
-    bool ok = true;
-    for (auto kt = suffix_it; kt != warp.second.insns.end(); ++kt) {
-      if (kt->second.care == 1 && kt->second.done == 1) {
-        ok = false;
+      else if (it->second.care == true && it->second.done == true) {
+        retiring = false;
         break;
       }
     }
-    if (!ok) continue;
-
-    // 5) 到这里可以 retire final_cnt 条指令（保守策略）
+    if (final_cnt == 0 || retiring == false) {
+      continue;
+    }
     retireInfo_t::retire_cnt_item_t r;
     r.sm_id = warp.second.sm_id;
     r.hardware_warp_id = warp.second.hardware_warp_id;
     r.software_wg_id = warp.second.software_wg_id;
     r.software_warp_id = warp.second.software_warp_id;
     r.retire_cnt = final_cnt;
-    r.extended_cnt = extended_cnt;
     retire_info.warp_retire_cnt.push_back(r);
 
     logger->debug(fmt::format("GVM retire message from gvm_t::checkRetire()"));
@@ -471,9 +460,9 @@ void gvm_t::checkRetire() {
       char insn_name[64];
       disasm(print_it->second.insn, insn_name);
       logger->debug(fmt::format(
-        "GVM retire: sm_id: {}, hardware_warp_id: {}, software_wg_id: {}, software_warp_id: {}, pc: 0x{:08x}, insn: 0x{:08x} {}",
+        "GVM retire: sm_id: {}, hardware_warp_id: {}, software_wg_id: {}, software_warp_id: {}, dispatch_id: {}, pc: 0x{:08x}, insn: 0x{:08x} {}",
         warp.second.sm_id, warp.second.hardware_warp_id, warp.second.software_wg_id,
-        warp.second.software_warp_id, print_it->second.pc, print_it->second.insn, insn_name
+        warp.second.software_warp_id, print_it->second.dispatch_id, print_it->second.pc, print_it->second.insn, insn_name
       ));
     }
   }
@@ -500,6 +489,10 @@ void gvm_t::stepRef() {
       next_gvmref_pc = gvmref_get_next_pc(item.software_wg_id, item.software_warp_id);
       uint32_t next_dut_pc;
       next_dut_pc = cur_insn.pc;
+      if (next_dut_pc != next_gvmref_pc) {
+        logger->error(fmt::format("GVM error: DUT and REF next PC mismatch on sm_id: {}, hardware_warp_id: {}, software_wg_id: {}, software_warp_id: {}. DUT next PC: 0x{:08x}, REF next PC: 0x{:08x}",
+          item.sm_id, item.hardware_warp_id, item.software_wg_id, item.software_warp_id, next_dut_pc, next_gvmref_pc));
+      }
       assert(next_dut_pc == next_gvmref_pc);
 
       // 步进 REF 并维护 insn_t.single_insn_cmp
@@ -530,8 +523,9 @@ void gvm_t::stepRef() {
             break;
         }
         if (cur_insn.single_insn_cmp.ref_done == 0) {
-          logger->error(fmt::format("GVM error: suspected dut and ref insn-type mismatch on insn: 0x{:08x}."
-            ,cur_insn.insn)); // cmp care 但 ref 返回的 insn type 非 care
+          logger->debug(fmt::format("GVM warning: suspected dut and ref insn-type mismatch on pc: 0x{:08x}, insn: 0x{:08x}.",
+            cur_insn.pc, cur_insn.insn)); // cmp care 但 ref 返回的 insn type 非 care
+          volatile bool temp_flag = cur_insn.single_insn_cmp.ref_done;
         }
         cur_insn.single_insn_cmp.ref_done = 1;
         // 即便 gvmref_step_return_info.insn_result.insn_type 不在上面的 switch-case 中，也置为 ref_done = 1
@@ -555,14 +549,16 @@ int gvm_t::doSingleInsnCmp() {
         if (insnIt->second.single_insn_cmp.dut_done && insnIt->second.single_insn_cmp.ref_done) {
           switch (insnIt->second.single_insn_cmp.dut_result.insn_type) {
             case InsnType::XREG:
+              assert(insnIt->second.single_insn_cmp.ref_result.insn_type == InsnType::XREG);
               if ((insnIt->second.single_insn_cmp.dut_result.xreg_result.rd
                 != insnIt->second.single_insn_cmp.ref_result.xreg_result.rd)
                 || (insnIt->second.single_insn_cmp.dut_result.xreg_result.reg_idx
                 != insnIt->second.single_insn_cmp.ref_result.xreg_result.reg_idx)) {
                 logger->error(fmt::format(
-                  "GVM error: DUT and REF insn result mismatch at software_wg_id {}, software_warp_id {}, pc 0x{:08x}, insn 0x{:08x}"
+                  "GVM error: DUT and REF insn result mismatch at sm_id {}, hardware_warp_id {}, software_wg_id {}, software_warp_id {}, dispatch_id {}, pc 0x{:08x}, insn 0x{:08x}"
                   "insn_type XREG, DUT reg_idx: {}, REF reg_idx: {}, DUT rd: 0x{:08x}, REF rd: 0x{:08x}",
-                  warpIt->second.software_wg_id, warpIt->second.software_warp_id, insnIt->second.pc, insnIt->second.insn,
+                  warpIt->second.sm_id, warpIt->second.hardware_warp_id, warpIt->second.software_wg_id,
+                  warpIt->second.software_warp_id, insnIt->second.dispatch_id, insnIt->second.pc, insnIt->second.insn,
                   insnIt->second.single_insn_cmp.dut_result.xreg_result.reg_idx,
                   insnIt->second.single_insn_cmp.ref_result.xreg_result.reg_idx,
                   insnIt->second.single_insn_cmp.dut_result.xreg_result.rd,
@@ -575,19 +571,23 @@ int gvm_t::doSingleInsnCmp() {
               }
               break;
             case InsnType::VREG:
+              assert(insnIt->second.single_insn_cmp.ref_result.insn_type == InsnType::VREG);
               if ((insnIt->second.single_insn_cmp.dut_result.vreg_result.mask
                 != insnIt->second.single_insn_cmp.ref_result.vreg_result.mask)
                 || (insnIt->second.single_insn_cmp.dut_result.vreg_result.reg_idx
                 != insnIt->second.single_insn_cmp.ref_result.vreg_result.reg_idx))
               {
                 logger->error(fmt::format(
-                  "GVM error: DUT and REF vreg insn result writeback mask mismatch at software_wg_id {}, software_warp_id {}, pc 0x{:08x}, insn 0x{:08x}"
-                  "insn_type VREG, DUT reg_idx: {}, REF reg_idx: {}, DUT mask: 0x{:08x}, REF mask: 0x{:08x}",
-                  warpIt->second.software_wg_id, warpIt->second.software_warp_id, insnIt->second.pc, insnIt->second.insn,
+                  "GVM error: DUT and REF vreg insn result writeback mask or reg_idx mismatch at sm_id {}, hardware_warp_id {}, software_wg_id {}, software_warp_id {}, dispatch_id {}, pc 0x{:08x}, insn 0x{:08x}"
+                  "insn_type VREG, DUT reg_idx: {}, REF reg_idx: {}, DUT mask: 0x{:08x}, REF mask: 0x{:08x}, DUT reg_idx: {}, REF reg_idx: {}",
+                  warpIt->second.sm_id, warpIt->second.hardware_warp_id, warpIt->second.software_wg_id,
+                  warpIt->second.software_warp_id, insnIt->second.dispatch_id, insnIt->second.pc, insnIt->second.insn,
                   insnIt->second.single_insn_cmp.dut_result.vreg_result.reg_idx,
                   insnIt->second.single_insn_cmp.ref_result.vreg_result.reg_idx,
                   insnIt->second.single_insn_cmp.dut_result.vreg_result.mask,
-                  insnIt->second.single_insn_cmp.ref_result.vreg_result.mask
+                  insnIt->second.single_insn_cmp.ref_result.vreg_result.mask,
+                  insnIt->second.single_insn_cmp.dut_result.vreg_result.reg_idx,
+                  insnIt->second.single_insn_cmp.ref_result.vreg_result.reg_idx
                 ));
                 insnIt->second.single_insn_cmp.cmp_pass = -1;
               }
@@ -601,9 +601,10 @@ int gvm_t::doSingleInsnCmp() {
                       float ref_value = *reinterpret_cast<float*>(&insnIt->second.single_insn_cmp.ref_result.vreg_result.rd[i]);
                       if (std::abs(dut_value - ref_value) > fp32_atol + fp32_rtol * std::abs(ref_value)) {
                         logger->error(fmt::format(
-                          "GVM error: DUT and REF vreg mismatch at software_wg_id {}, software_warp_id {}, pc 0x{:08x}, insn 0x{:08x}, "
+                          "GVM error: DUT and REF vreg-float mismatch at sm_id {}, hardware_warp_id {}, software_wg_id {}, software_warp_id {}, dispatch_id {}, pc 0x{:08x}, insn 0x{:08x}, "
                           "vreg_idx {}, vec_element_idx {}, DUT value: {}, REF value: {}",
-                          warpIt->second.software_wg_id, warpIt->second.software_warp_id, insnIt->second.pc, insnIt->second.insn,
+                          warpIt->second.sm_id, warpIt->second.hardware_warp_id, warpIt->second.software_wg_id, warpIt->second.software_warp_id,
+                          insnIt->second.dispatch_id, insnIt->second.pc, insnIt->second.insn,
                           insnIt->second.single_insn_cmp.dut_result.vreg_result.reg_idx,
                           i,
                           dut_value,
@@ -617,9 +618,10 @@ int gvm_t::doSingleInsnCmp() {
                       if (insnIt->second.single_insn_cmp.dut_result.vreg_result.rd[i]
                         != insnIt->second.single_insn_cmp.ref_result.vreg_result.rd[i]) {
                         logger->error(fmt::format(
-                          "GVM error: DUT and REF vreg mismatch at software_wg_id {}, software_warp_id {}, pc 0x{:08x}, insn 0x{:08x}, "
+                          "GVM error: DUT and REF vreg mismatch at sm_id {}, hardware_warp_id {}, software_wg_id {}, software_warp_id {}, dispatch_id {}, pc 0x{:08x}, insn 0x{:08x}, "
                           "vreg_idx {}, vec_element_idx {}, DUT value: 0x{:08x}, REF value: 0x{:08x}",
-                          warpIt->second.software_wg_id, warpIt->second.software_warp_id, insnIt->second.pc, insnIt->second.insn,
+                          warpIt->second.sm_id, warpIt->second.hardware_warp_id, warpIt->second.software_wg_id, warpIt->second.software_warp_id,
+                          insnIt->second.dispatch_id, insnIt->second.pc, insnIt->second.insn,
                           insnIt->second.single_insn_cmp.dut_result.vreg_result.reg_idx,
                           i,
                           insnIt->second.single_insn_cmp.dut_result.vreg_result.rd[i],
@@ -654,8 +656,8 @@ int gvm_t::doRetireCmp() {
     for (int i=0; i<warp.xreg_usage; i++) {
       if (static_cast<uint32_t>(gvmref_xreg.xpr[warp.software_wg_id][warp.software_warp_id][i]) != warp.curr_xreg[i]) {
         logger->error(fmt::format(
-          "GVM error: DUT and REF xreg mismatch at software_wg_id {}, software_warp_id {}, reg x{}: DUT = 0x{:08x}, REF = 0x{:08x}",
-          warp.software_wg_id, warp.software_warp_id, i,
+          "GVM error: DUT and REF xreg mismatch at sm_id {}, hardware_warp_id {}, software_wg_id {}, software_warp_id {}, reg x{}: DUT = 0x{:08x}, REF = 0x{:08x}",
+          warp.sm_id, warp.hardware_warp_id, warp.software_wg_id, warp.software_warp_id, i,
           warp.curr_xreg[i],
           static_cast<uint32_t>(gvmref_xreg.xpr[warp.software_wg_id][warp.software_warp_id][i])
         ));

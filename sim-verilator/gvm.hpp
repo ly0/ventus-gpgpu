@@ -56,4 +56,5 @@ private:
   static const std::vector<care_insn_t> fp32_vreg_insns;
   void disasm(uint32_t insn, char* insn_name);
   static const std::vector<care_insn_t> disasm_table;
+  static const std::vector<care_insn_t> barrier_insns;
 };
