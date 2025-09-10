@@ -17,7 +17,6 @@ extern "C" {
 typedef struct ventus_rtlsim_t ventus_rtlsim_t;
 typedef uint64_t paddr_t;
 
-
 typedef struct ventus_kernel_metadata_t { // 这个metadata是供驱动使用的，而不是给硬件的
     // Additional data
     const char* name; // kernel name

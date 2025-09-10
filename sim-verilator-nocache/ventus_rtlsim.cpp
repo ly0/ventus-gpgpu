@@ -1,5 +1,8 @@
 #include "ventus_rtlsim_impl.hpp"
+#include <ctime>
 
+static char verilator_rand_seed_setting[128] = "+verilator+seed+10086";
+static char* verilator_runtime_args_default[] = { verilator_rand_seed_setting };
 extern "C" void ventus_rtlsim_get_default_config(ventus_rtlsim_config_t* config) {
     if (config == nullptr)
         return;
@@ -22,8 +25,12 @@ extern "C" void ventus_rtlsim_get_default_config(ventus_rtlsim_config_t* config)
     config->snapshot.time_interval = 100000;
     config->snapshot.num_max = 2;
     config->snapshot.filename = "logs/ventus_rtlsim.snapshot.fst";
-    config->verilator.argc = 0;
-    config->verilator.argv = nullptr;
+
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    snprintf(verilator_rand_seed_setting, sizeof(verilator_rand_seed_setting), "+verilator+seed+%ld", ts.tv_nsec);
+    config->verilator.argc = sizeof(verilator_runtime_args_default) / sizeof(verilator_runtime_args_default[0]);
+    config->verilator.argv = (const char**)(verilator_runtime_args_default);
 }
 
 extern "C" ventus_rtlsim_t* ventus_rtlsim_init(const ventus_rtlsim_config_t* config) {
@@ -56,7 +63,9 @@ extern "C" void ventus_rtlsim_add_kernel(
     ventus_rtlsim_add_kernel__delay_data_loading(sim, metadata, nullptr, finish_callback);
 }
 
-extern "C" bool ventus_rtlsim_pmem_page_alloc(ventus_rtlsim_t* sim, paddr_t base) { return sim->pmem->page_alloc(base); }
+extern "C" bool ventus_rtlsim_pmem_page_alloc(ventus_rtlsim_t* sim, paddr_t base) {
+    return sim->pmem->page_alloc(base);
+}
 extern "C" bool ventus_rtlsim_pmem_page_free(ventus_rtlsim_t* sim, paddr_t base) { return sim->pmem->page_free(base); }
 extern "C" bool ventus_rtlsim_pmemcpy_h2d(ventus_rtlsim_t* sim, paddr_t dst, const void* src, uint64_t size) {
     return sim->pmem->write(dst, src, size);
