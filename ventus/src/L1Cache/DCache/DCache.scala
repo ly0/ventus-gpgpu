@@ -210,8 +210,7 @@ class DataCache(SV: Option[mmu.SVParam] = None)(implicit p: Parameters) extends 
   val inflightreadwritemiss_w = (coreReqControl_st0_noen.isWrite && MshrAccess.io.mshrStatus_st0 =/= 0.U) || inflightReadWriteMiss
   // ******     pipeline regs      ******
   coreReq_Q.io.enq.valid := io.coreReq.valid && !probereadAllocateWriteConflict && TagAccess.io.probeRead.ready  && (MshrAccess.io.mshrStatus_st0 =/= 3.U) && (MshrAccess.io.mshrStatus_st0 =/= 1.U) && 
-                            !(io.coreReq.bits.opcode === 3.U && (!MshrAccess.io.empty) && coreReq_Q.io.deq.bits.opcode =/= 4.U) && !MshrAccess.io.releasing_stall   
-                            // 这里加入 coreReq_Q.io.deq.bits.opcode =/= 4.U 条件是为了避免当 mshr 此时为空，但是 deq 了一个读导致下个 clk 不为空导致的 invalidate 提前进入问题
+                            !(io.coreReq.bits.opcode === 3.U && (!MshrAccess.io.empty) ) && !MshrAccess.io.releasing_stall   
   // coreReq_st0_ready 信号用来使能本次的 CoreReq 请求是否用于探测MSHR                            
   // 这里 MshrAccess.io.releasing_stall 其实可以不用考虑，这里只是为了和原来版本对齐
   // 假如没加 MshrAccess.io.releasing_stall 信号，mshrStatus_st0 会返回清楚 MSHR entry 的中间信号，但是因为 coreReq.ready 信号已经与上了 releasing_stall 信号，所以不会出现错误 
@@ -299,7 +298,8 @@ class DataCache(SV: Option[mmu.SVParam] = None)(implicit p: Parameters) extends 
     coreReq_Q.io.deq.bits.opcode === 3.U && coreReq_Q.io.deq.bits.param =/= 2.U
   coreReqInvOrFluValid_st1 := coreReq_st1_valid &&
     (coreReqControl_st1_Q.io.deq.bits.isInvalidate || coreReqControl_st1_Q.io.deq.bits.isFlush)
-  val coreReqInv_st1: Bool = coreReqControl_st1_Q.io.deq.bits.isInvalidate
+  // val coreReqInv_st1: Bool = coreReqControl_st1_Q.io.deq.bits.isInvalidate
+  // 上面这个定义没有被使用，这里去掉
   TagAccess.io.flushChoosen.get.valid := (coreReqInvOrFluValid_st0 || coreReqInvOrFluValid_st1) &&
     TagAccess.io.hasDirty_st0.get//TODO add LRSC cond
   TagAccess.io.flushChoosen.get.bits := //TODO add LRSC cond
@@ -772,12 +772,13 @@ class DataCache(SV: Option[mmu.SVParam] = None)(implicit p: Parameters) extends 
     flushL2_Reg := false.B
   }
 
-  flushL2 :=  (invalidatenodirty && MemReqArb.io.in(2).ready && !flushL2_Reg)
-  when(flushL2){
-    InvOrFluAlreadyflush := true.B
-  }.elsewhen(coreReqInvOrFluValid_st0){
-    InvOrFluAlreadyflush := false.B
-  }
+  flushL2 :=  (invalidatenodirty && MemReqArb.io.in(2).ready && !flushL2_Reg && WshrAccess.io.empty)
+  // when(flushL2){
+  //   InvOrFluAlreadyflush := true.B
+  // }.elsewhen(coreReqInvOrFluValid_st0){
+  //   InvOrFluAlreadyflush := false.B
+  // }
+  // 上面这个定义没有被使用，这里去掉
   TagAccess.io.invalidateAll := flushL2 && coreReqControl_st1_Q.io.deq.bits.isInvalidate
 
   memReq_Q.io.enq <> MemReqArb.io.out
