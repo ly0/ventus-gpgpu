@@ -32,6 +32,7 @@ extern "C" struct ventus_rtlsim_t {
 #ifdef ENABLE_GVM
     gvm_t gvm;
 #endif // ENABLE_GVM
+    bool need_icache_invalidate = false;
 
     void constructor(const ventus_rtlsim_config_t* config);
     void dut_reset() const;

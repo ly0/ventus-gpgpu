@@ -77,7 +77,7 @@ VLIB_OBJ_EXPORT = $(VLIB_SRC_CXX_EXPORT:%.cpp=$(VLIB_DIR_BUILDOBJ)/%.o)
 
 # Verilated model parallelism config
 VLIB_NPROC_CPU = $(shell nproc)
-VLIB_NPROC_DUT = 11 # Depends on RTL circuit size, just try and find a verilator-allowed largest number
+VLIB_NPROC_DUT = 8 # Depends on RTL circuit size, just try and find a verilator-allowed largest number
 VLIB_NPROC_SIM = $(call MIN_FUNC, $(VLIB_NPROC_CPU), $(VLIB_NPROC_DUT))
 VLIB_NPROC_TRACE_FST = $(call MIN_FUNC, $(VLIB_NPROC_SIM), 2)
 
@@ -87,13 +87,20 @@ VLIB_VERILATOR_FLAGS += -MMD
 VLIB_VERILATOR_FLAGS += --error-limit 100
 # How to deal with verilog value 'x' and 'z'
 ifeq ($(RELEASE),1)
-VLIB_VERILATOR_FLAGS += -x-assign fast -x-initial fast
+VLIB_VERILATOR_FLAGS += --x-assign fast --x-initial unique
 else
-VLIB_VERILATOR_FLAGS += -x-assign unique -x-initial unique
+VLIB_VERILATOR_FLAGS += --x-assign unique --x-initial unique
 endif
 # Warn about lint issues; may not want this on less solid designs
 #VLIB_VERILATOR_FLAGS += -Wall
 VLIB_VERILATOR_FLAGS += -Wno-WIDTHEXPAND
+VLIB_VERILATOR_FLAGS += -Wno-WIDTHTRUNC
+# Define macros for Verilog
+# random init
+VLIB_VERILATOR_FLAGS += -DPRINTF_COND=1
+VLIB_VERILATOR_FLAGS += -DRANDOMIZE
+VLIB_VERILATOR_FLAGS += -DRANDOMIZE_MEM_INIT
+VLIB_VERILATOR_FLAGS += -DRANDOMIZE_REG_INIT
 # Make waveforms
 VLIB_VERILATOR_FLAGS += --trace-fst
 # Check SystemVerilog assertions
@@ -135,7 +142,6 @@ default: lib
 $(VLIB_SRC_V): $(VLIB_SRC_SCALA)
 	cd .. && ./mill ventus[6.4.0].runMain circt.stage.ChiselMain --module top.GPGPU_top_nocache --target chirrtl --target-dir sim-verilator-nocache
 	firtool --verilog GPGPU_top_nocache.fir -o $(VLIB_SRC_V)
-	sed -i "1i\`define PRINTF_COND 1" $(VLIB_SRC_V)
 
 verilog: $(VLIB_SRC_V)
 

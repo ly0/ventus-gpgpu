@@ -179,20 +179,20 @@ if(MMU_ENABLED) {
   //io.allocateWrite.ready := true.B
   //although use arb, src0 and src1 should not come in same cycle
   val timeAccessWArb = Module(new Arbiter (new SRAMBundleAW(UInt(Length_Replace_time_SRAM.W),set,way),2))
-  val timeAccessWarbConflict = io.hit_st1 && RegNext(io.allocateWrite.fire)
-  val timeAccessWarbConflictReg = RegNext(timeAccessWarbConflict)
+  val timeAccessWarbConflict = io.hit_st1 && RegNext(io.allocateWrite.fire, false.B)
+  val timeAccessWarbConflictReg = RegNext(timeAccessWarbConflict, false.B)
 
   assert(!(timeAccessWArb.io.in(0).valid && timeAccessWArb.io.in(1).valid), s"tag probe and allocate in same cycle")
   //LRU replacement policy
   //timeAccessWArb.io.in(0) for regular R/W hit update access time
-  timeAccessWArb.io.in(0).valid := Mux(timeAccessWarbConflictReg,RegNext(io.hit_st1),Mux(timeAccessWarbConflict,false.B,   io.hit_st1))//hit already contain probe fire
+  timeAccessWArb.io.in(0).valid := Mux(timeAccessWarbConflictReg, RegNext(io.hit_st1, false.B), Mux(timeAccessWarbConflict,false.B,io.hit_st1))//hit already contain probe fire
   timeAccessWArb.io.in(0).bits(
     data = Mux(timeAccessWarbConflictReg,RegNext(accessCount),accessCount),
     setIdx = Mux(timeAccessWarbConflictReg,RegNext(RegNext(io.probeRead.bits.setIdx)),RegNext(io.probeRead.bits.setIdx)),
     waymask = Mux(timeAccessWarbConflictReg,RegNext(io.waymaskHit_st1),io.waymaskHit_st1)
   )
   //timeAccessWArb.io.in(1) for memRsp allocate
-  timeAccessWArb.io.in(1).valid := RegNext(io.allocateWrite.fire)
+  timeAccessWArb.io.in(1).valid := RegNext(io.allocateWrite.fire, false.B)
   timeAccessWArb.io.in(1).bits(
     data = accessCount,
     setIdx = RegNext(io.allocateWrite.bits.setIdx),
@@ -259,7 +259,7 @@ if(MMU_ENABLED) {
   // 只有当 flushChoosen 拉高时，读出来 dirty mask 才会被用到，需要被写0
   // 这里的 valid 需要用 RegNext 延迟一周期是因为在dcache的顶层模块将 InvOrFluMemReqValid_st1 里也延了一个clk
   // 不使用dcache中的 InvOrFluMemReqValid_st1 是因为与tag的发出对齐
-  dirtyMaskWriteArb.io.in(2).valid := RegNext(io.flushChoosen.get.valid)
+  dirtyMaskWriteArb.io.in(2).valid := RegNext(io.flushChoosen.get.valid, false.B)
   dirtyMaskWriteArb.io.in(2).bits.apply(data = 0.U, setIdx = RegNext(choosenDirtySetIdx_st0), waymask = choosenDirtyWayMask_st1)
 
   iTagChecker.io.tag_of_set := tagBodyAccess.io.r.resp.data//st1
@@ -291,7 +291,7 @@ if(MMU_ENABLED) {
 
 
   if (!readOnly) {
-    io.needReplace.get := way_dirty(allocateWrite_st1.setIdx)(OHToUInt(Replacement.io.waymask_st1)).asBool && RegNext(io.allocateWrite.fire)
+    io.needReplace.get := way_dirty(allocateWrite_st1.setIdx)(OHToUInt(Replacement.io.waymask_st1)).asBool && RegNext(io.allocateWrite.fire, false.B)
   }
   // ******      tag_array::allocate    ******
   Replacement.io.validOfSet := Reverse(Cat(way_valid(allocateWrite_st1.setIdx)))//Reverse(Cat(way_valid(io.allocateWrite.bits.setIdx)))
@@ -311,7 +311,7 @@ if(MMU_ENABLED) {
   tagBodyAccess.io.w.req.bits.apply(data = io.allocateWriteData_st1, setIdx = allocateWrite_st1.setIdx, waymask = Replacement.io.waymask_st1)
 
 
-  when(RegNext(io.allocateWrite.fire) && !Replacement.io.Set_is_full){//meta_entry_t::allocate TODO
+  when(RegNext(io.allocateWrite.fire, false.B) && !Replacement.io.Set_is_full){//meta_entry_t::allocate TODO
     way_valid(allocateWrite_st1.setIdx)(OHToUInt(Replacement.io.waymask_st1)) := true.B
   }.elsewhen(io.invalidateAll){//tag_array::invalidate_all()
     way_valid := VecInit(Seq.fill(set)(VecInit(Seq.fill(way)(false.B))))
@@ -330,7 +330,7 @@ if(MMU_ENABLED) {
     choosenDirtySetIdx_st0 := PriorityEncoder(setDirty)
     choosenDirtySetValid := way_dirtyAfterValid(choosenDirtySetIdx_st0)
     choosenDirtyWayMask_st0 := VecInit(PriorityEncoderOH(choosenDirtySetValid)).asUInt
-    choosenDirtyWayMask_st1 := RegNext(choosenDirtyWayMask_st0)
+    choosenDirtyWayMask_st1 := RegNext(choosenDirtyWayMask_st0, 0.U)
     choosenDirtyTag_st1 := tagBodyAccess.io.r.resp.data(OHToUInt(choosenDirtyWayMask_st1))//todo:check correctness
 
     //val choosenDirtySetIdx_st1 = RegNext(choosenDirtySetIdx_st0)
@@ -445,6 +445,8 @@ class L1TagAccess_ICache(set: Int, way: Int, tagBits: Int, AsidBits: Int)extends
     val waymaskHit_st1 = Output(UInt(way.W))
 
     val hit_st1 = Output(Bool())
+
+    val invalidate = Input(Bool())
   })
   val tagBodyAccess = Module(new SRAMTemplate(
     UInt(tagBits.W),
@@ -456,6 +458,8 @@ class L1TagAccess_ICache(set: Int, way: Int, tagBits: Int, AsidBits: Int)extends
     bypassWrite = false
   ))
   tagBodyAccess.io.r <> io.r
+  tagBodyAccess.io.r.req.valid := io.r.req.valid && !io.invalidate
+  io.r.req.ready := tagBodyAccess.io.r.req.ready && !io.invalidate
 
   val way_valid = RegInit(VecInit(Seq.fill(set)(VecInit(Seq.fill(way)(0.U(1.W))))))
   //val way_valid = Mem(set, UInt(way.W))
@@ -477,10 +481,12 @@ class L1TagAccess_ICache(set: Int, way: Int, tagBits: Int, AsidBits: Int)extends
     ))
 
     asidAccess.io.r <> io.r_asid.get
+    asidAccess.io.r.req.valid := io.r.req.valid && !io.invalidate
+    io.r.req.ready := asidAccess.io.r.req.ready && !io.invalidate
     iTagChecker.io.ASID_of_set.get := asidAccess.io.r.resp.data
     iTagChecker.io.ASID_from_pipe.get := io.asidFromCore_st1.get
-    asidAccess.io.w.req.valid := io.w_asid.get.req.valid
-    io.w_asid.get.req.ready := asidAccess.io.w.req.ready
+    asidAccess.io.w.req.valid := io.w_asid.get.req.valid && !io.invalidate
+    io.w_asid.get.req.ready := asidAccess.io.w.req.ready && !io.invalidate
     asidAccess.io.w.req.bits.apply(data = io.w_asid.get.req.bits.data, setIdx = io.w_asid.get.req.bits.setIdx, waymask = Replacement.io.waymask)
   }
   iTagChecker.io.way_valid := way_valid(RegEnable(io.r.req.bits.setIdx, io.coreReqReady)) //st1
@@ -489,13 +495,14 @@ class L1TagAccess_ICache(set: Int, way: Int, tagBits: Int, AsidBits: Int)extends
 
   Replacement.io.validbits_of_set := Cat(way_valid(io.w.req.bits.setIdx))
   io.waymaskReplacement := Replacement.io.waymask
-  tagBodyAccess.io.w.req.valid := io.w.req.valid
+  tagBodyAccess.io.w.req.valid := io.w.req.valid && !io.invalidate
 
-  io.w.req.ready := tagBodyAccess.io.w.req.ready
+  io.w.req.ready := tagBodyAccess.io.w.req.ready && !io.invalidate
   tagBodyAccess.io.w.req.bits.apply(data = io.w.req.bits.data, setIdx = io.w.req.bits.setIdx, waymask = Replacement.io.waymask)
 
-
-  when(io.w.req.valid && !Replacement.io.Set_is_full) {
+  when(io.invalidate) {
+    way_valid := 0.U.asTypeOf(way_valid)
+  } .elsewhen(io.w.req.valid && !Replacement.io.Set_is_full) {
     way_valid(io.w.req.bits.setIdx)(OHToUInt(Replacement.io.waymask)) := true.B
   }
 

@@ -133,6 +133,7 @@ class GPGPU_axi_top extends Module{
   gpgpu_top.io.host_req<>axi_lite_adapter.io.data
   gpgpu_top.io.host_rsp<>axi_lite_adapter.io.rsp
   gpgpu_top.io.cycle_cnt:=0.U
+  gpgpu_top.io.icache_invalidate:=false.B
 }
 class GPGPU_axi_adapter_top extends Module{
   val l2cache_axi_params=AXI4BundleParameters(32,64,log2Up(l2cache_micro.num_sm)+log2Up(l2cache_micro.num_warp)+1)
@@ -158,6 +159,7 @@ class GPGPU_top(implicit p: Parameters, FakeCache: Boolean = false, SV: Option[m
     val inst_cnt2 = if(INST_CNT_2) Some(Output(Vec(NSms, Vec(2, UInt(32.W))))) else None
     val cycle_cnt = Input(UInt(20.W))
     val asid_fill = if(MMU_ENABLED) Some(Input(Flipped(ValidIO(new mmu.AsidLookupEntry(SV.get))))) else None
+    val icache_invalidate = Input(Bool())
   })
   val cta = Module(new CTAinterface)
   val sm_wrapper=VecInit((0 until NSms).map(i => Module(new SM_wrapper(FakeCache, i, SV)).io))
@@ -179,6 +181,7 @@ class GPGPU_top(implicit p: Parameters, FakeCache: Boolean = false, SV: Option[m
       sm_wrapper(i * NSmInCluster + j).memRsp.bits := sm2clusterArb(i).memRspVecOut(j).bits
       sm_wrapper(i * NSmInCluster + j).memRsp.valid := sm2clusterArb(i).memRspVecOut(j).valid
        sm2clusterArb(i).memRspVecOut(j).ready := sm_wrapper(i * NSmInCluster + j).memRsp.ready
+      sm_wrapper(i * NSmInCluster + j).icache_invalidate := io.icache_invalidate
     }
     l2distribute(i).memReqIn.valid := sm2clusterArb(i).memReqOut.valid
     l2distribute(i).memReqIn.bits := sm2clusterArb(i).memReqOut.bits
@@ -341,6 +344,7 @@ class SM_wrapper(FakeCache: Boolean = false, sm_id: Int = 0, SV: Option[mmu.SVPa
       val ppn = UInt(SV.getOrElse(mmu.SV32).ppnLen.W)
       val flags = UInt(8.W)
     })))) else None
+    val icache_invalidate = Input(Bool())
     //val inst_cnt = if(INST_CNT) Some(Output(UInt(32.W))) else None
     val inst_cnt2 = if(INST_CNT_2) Some(Output(Vec(2, UInt(32.W)))) else None
   })
@@ -363,6 +367,7 @@ class SM_wrapper(FakeCache: Boolean = false, sm_id: Int = 0, SV: Option[mmu.SVPa
   l1Cache2L2Arb.io.memRspIn <> io.memRsp
 
   val icache = Module(new InstructionCache(SV)(param))
+  icache.io.invalidate := io.icache_invalidate
   // **** icache memRsp ****
   icache.io.memRsp.valid := l1Cache2L2Arb.io.memRspVecOut(0).valid
   icache.io.memRsp.bits.d_addr := l1Cache2L2Arb.io.memRspVecOut(0).bits.d_addr
