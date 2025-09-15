@@ -15,6 +15,7 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <string>
+#include <sys/prctl.h>
 #include <sys/wait.h>
 #include <utility>
 
@@ -370,6 +371,15 @@ void ventus_rtlsim_t::snapshot_fork() {
         logger->info("SNAPSHOT created, pid={}", child_pid);
     } else { // for the fork-child snapshot process
         snapshots.is_child = true;
+        // child process should exit when parent process exits
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) == -1) {
+            perror("prctl(PR_SET_PDEATHSIG)");
+            std::exit(EXIT_FAILURE);
+        }
+        if (getppid() == 1) { // parent process already exited
+            std::exit(EXIT_FAILURE);
+        }
+        // wait for main process
         sigset_t set, oldset;
         siginfo_t info;
         sigemptyset(&set);
@@ -378,11 +388,13 @@ void ventus_rtlsim_t::snapshot_fork() {
         sigwaitinfo(&set, &info);                // Wait for snapshot-rollback
         sigprocmask(SIG_SETMASK, &oldset, NULL); // Change signal blocking mask back
         assert(info.si_signo == SNAPSHOT_WAKEUP_SIGNAL);
+        // main process invoked snapshot rollback
         snapshots.main_exit_time = (uint64_t)(info.si_value.sival_ptr);
         logger->info(
             "SNAPSHOT is activated, sim_time = {}, origin process exited at time {}", contextp->time(),
             snapshots.main_exit_time
         );
+        // create a new waveform dump file
         //  delete tfp;             // Cannot do this, or it will block the process
         //  (maybe because Vdut.fst was already closed in the parent process?)
         tfp = new VerilatedFstC(); // This will cause memory leak for once, but not serious. How to fix it?
