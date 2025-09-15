@@ -11,6 +11,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <spdlog/common.h>
 #include <spdlog/formatter.h>
@@ -49,12 +50,19 @@ struct CleanupRegister {
     CleanupRegister() { std::atexit(cleanup); }
 } _cleanup_register;
 
-static volatile std::sig_atomic_t g_aborted = false;
+//
+// cleanup at interrupt or abort
+//
 
-void signal_abort_handler(int signum) {
-    std::cerr << "Received signal " << signum << ", aborting simulation..." << std::endl;
-    g_aborted = true;
-}
+static volatile std::sig_atomic_t g_interrupt = false;
+static volatile std::sig_atomic_t g_aborted = false;
+static std::optional<struct sigaction> g_sigabort_old = std::nullopt;
+void signal_interrupt_handler(int signum) { g_interrupt = true; }
+void signal_abort_handler(int signum) { g_aborted = true; }
+
+//
+// Helpers
+//
 
 constexpr unsigned log2Ceil(unsigned n) {
     unsigned log = 0;
@@ -98,7 +106,7 @@ void icache_rsp_sm0(Vdut* dut, const std::unique_ptr<icache_reqrsp_t>& rsp);
 void icache_rsp_sm1(Vdut* dut, const std::unique_ptr<icache_reqrsp_t>& rsp);
 std::vector<std::unique_ptr<icache_reqrsp_t>> get_icache_req(Vdut* dut);
 
-// helper
+// convert log level string to spdlog level enum
 static spdlog::level::level_enum get_log_level(const char* level) {
     if (level == nullptr) {
         // set to default level later
@@ -142,6 +150,10 @@ public:
 private:
     std::function<std::string()> m_callback;
 };
+
+//
+// RTLSIM implementation
+//
 
 void ventus_rtlsim_t::constructor(const ventus_rtlsim_config_t* config_) {
     // copy and check sim config
@@ -228,12 +240,17 @@ void ventus_rtlsim_t::constructor(const ventus_rtlsim_config_t* config_) {
         tfp = new VerilatedFstC;
         dut->trace(tfp, config.waveform.levels);
         tfp->open(config.waveform.filename);
+        // sig abort
         struct sigaction sa;
         sa.sa_handler = signal_abort_handler;
         sa.sa_flags = 0;
         sigemptyset(&sa.sa_mask);
-        sigaction(SIGINT, &sa, NULL);
-        sigaction(SIGABRT, &sa, NULL);
+        struct sigaction sa_old;
+        sigaction(SIGABRT, &sa, &sa_old);
+        g_sigabort_old = sa_old;
+        // sig interrupt
+        sa.sa_handler = signal_interrupt_handler;
+        sigaction(SIGINT, &sa, nullptr);
     } else {
         tfp = nullptr;
     }
@@ -429,9 +446,19 @@ const ventus_rtlsim_step_result_t* ventus_rtlsim_t::step() {
     //
     // Abort?
     //
+    if (g_interrupt) {
+        destructor(false);
+        std::exit(130);
+    }
     if (g_aborted) {
         destructor(false);
-        exit(-1);
+        if (g_sigabort_old.has_value()) {
+            sigaction(SIGABRT, &(g_sigabort_old.value()), nullptr);
+            g_sigabort_old = std::nullopt;
+            raise(SIGABRT); // 让进程按默认方式终止
+        } else {
+            std::exit(EXIT_FAILURE);
+        }
     }
 
     //

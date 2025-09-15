@@ -10,6 +10,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <spdlog/common.h>
 #include <spdlog/formatter.h>
 #include <spdlog/sinks/basic_file_sink.h>
@@ -19,7 +20,9 @@
 #include <sys/wait.h>
 #include <utility>
 
+//
 // cleanup at exit
+//
 static std::vector<ventus_rtlsim_t*> g_instances;
 
 // cleanup: mainly for Verilator FST waveform dump
@@ -43,7 +46,21 @@ struct CleanupRegister {
     CleanupRegister() { std::atexit(cleanup); }
 } _cleanup_register;
 
-// helper
+//
+// cleanup at interrupt or abort
+//
+
+static volatile std::sig_atomic_t g_interrupt = false;
+static volatile std::sig_atomic_t g_aborted = false;
+static std::optional<struct sigaction> g_sigabort_old = std::nullopt;
+void signal_interrupt_handler(int signum) { g_interrupt = true; }
+void signal_abort_handler(int signum) { g_aborted = true; }
+
+//
+// Helpers
+//
+
+// convert log level string to spdlog level enum
 static spdlog::level::level_enum get_log_level(const char* level) {
     if (level == nullptr) {
         // set to default level later
@@ -87,6 +104,10 @@ public:
 private:
     std::function<std::string()> m_callback;
 };
+
+//
+// RTLSIM implementation
+//
 
 void ventus_rtlsim_t::constructor(const ventus_rtlsim_config_t* config_) {
     // copy and check sim config
@@ -170,6 +191,17 @@ void ventus_rtlsim_t::constructor(const ventus_rtlsim_config_t* config_) {
         tfp = new VerilatedFstC;
         dut->trace(tfp, config.waveform.levels);
         tfp->open(config.waveform.filename);
+        // sig abort
+        struct sigaction sa;
+        sa.sa_handler = signal_abort_handler;
+        sa.sa_flags = 0;
+        sigemptyset(&sa.sa_mask);
+        struct sigaction sa_old;
+        sigaction(SIGABRT, &sa, &sa_old);
+        g_sigabort_old = sa_old;
+        // sig interrupt
+        sa.sa_handler = signal_interrupt_handler;
+        sigaction(SIGINT, &sa, nullptr);
     } else {
         tfp = nullptr;
     }
@@ -266,6 +298,24 @@ const ventus_rtlsim_step_result_t* ventus_rtlsim_t::step() {
     //
     dut->eval();
     waveform_dump();
+
+    //
+    // Abort?
+    //
+    if (g_interrupt) {
+        destructor(false);
+        std::exit(130);
+    }
+    if (g_aborted) {
+        destructor(false);
+        if (g_sigabort_old.has_value()) {
+            sigaction(SIGABRT, &(g_sigabort_old.value()), nullptr);
+            g_sigabort_old = std::nullopt;
+            raise(SIGABRT); // 让进程按默认方式终止，允许Coredump
+        } else {
+            std::exit(EXIT_FAILURE);
+        }
+    }
 
     //
     // Clock output
