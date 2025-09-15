@@ -4,9 +4,9 @@ import L2cache.{CacheParameters, InclusiveCacheMicroParameters, InclusiveCachePa
 import chisel3.util._
 
 object parameters { //notice log2Ceil(4) returns 2.that is ,n is the total num, not the last idx.
-  def num_sm = 2
+  def num_sm = 1
   var num_warp = 8
-  var num_thread = 32
+  var num_thread = 16
   val SINGLE_INST: Boolean = false
   val SPIKE_OUTPUT: Boolean = true
   val INST_CNT: Boolean = true
@@ -17,7 +17,7 @@ object parameters { //notice log2Ceil(4) returns 2.that is ,n is the total num, 
   val wid_to_check = 2
   def num_bank = 4                  // # of banks for register file
   def num_collectorUnit = num_warp
-  def num_vgpr:Int = 256*num_warp
+  def num_vgpr:Int = 128*num_warp
   def num_sgpr:Int = 256*num_warp
   def depth_regBank = log2Ceil(num_vgpr/num_bank)
   def regidx_width = 5

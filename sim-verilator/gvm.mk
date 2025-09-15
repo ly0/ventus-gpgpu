@@ -32,6 +32,8 @@ VLIB_VERILATOR = $(VERILATOR_ROOT)/bin/verilator
 VLIB_VERILATOR_COVERAGE = $(VERILATOR_ROOT)/bin/verilator_coverage
 endif
 
+VLIB_TOP_MODULE ?= GPGPU_SimTop
+
 CCACHE = $(shell which ccache)
 ifeq ($(CCACHE),)
 CC  = gcc
@@ -79,7 +81,7 @@ VLIB_OBJ_EXPORT = $(VLIB_SRC_CXX_EXPORT:%.cpp=$(VLIB_DIR_BUILDOBJ)/%.o)
 
 # Verilated model parallelism config
 VLIB_NPROC_CPU = $(shell nproc)
-VLIB_NPROC_DUT = 11 # Depends on RTL circuit size, just try and find a verilator-allowed largest number
+VLIB_NPROC_DUT = 8 # Depends on RTL circuit size, just try and find a verilator-allowed largest number
 VLIB_NPROC_SIM = $(call MIN_FUNC, $(VLIB_NPROC_CPU), $(VLIB_NPROC_DUT))
 VLIB_NPROC_TRACE_FST = $(call MIN_FUNC, $(VLIB_NPROC_SIM), 2)
 
@@ -108,6 +110,8 @@ VLIB_VERILATOR_FLAGS += --assert
 #VLIB_VERILATOR_FLAGS += --gdbbt
 # Disable DPI threads to avoid issues with some toolchains
 
+VLIB_VERILATOR_FLAGS += --top-module $(VLIB_TOP_MODULE)
+
 ifeq ($(RELEASE),1)
 VLIB_CFLAGS += -O2 -fvisibility=hidden
 else
@@ -118,6 +122,8 @@ VLIB_CXXFLAGS += $(VLIB_CFLAGS)
 VLIB_CXXFLAGS += -std=c++20
 VLIB_CXXFLAGS += -DSPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE
 VLIB_CXXFLAGS += -DENABLE_GVM=1
+RTL_NUM_THREAD ?= 16
+VLIB_CXXFLAGS += -DRTL_NUM_THREAD=$(RTL_NUM_THREAD)
 #VLIB_CXXFLAGS += -fsanitize=address,undefined
 VLIB_LDFLAGS += -lc
 ifeq ($(MOLD),1)
@@ -138,6 +144,7 @@ VLIB_VERILATOR_FLAGS += --prefix Vdut -Mdir $(VLIB_DIR_BUILDOBJ)
 default: lib
 
 $(VLIB_SRC_V): $(VLIB_SRC_SCALA)
+	@sed -i 's/val GVM_ENABLED: Boolean = .*/val GVM_ENABLED: Boolean = true/' $(PARAM_FILE)
 	mkdir -p $(VLIB_SRC_V_DIR)
 	cd .. && ./mill ventus[6.4.0].runMain circt.stage.ChiselMain --module top.GPGPU_SimTop --target chirrtl --target-dir sim-verilator/$(VLIB_SRC_V_DIR)/
 	cd $(VLIB_SRC_V_DIR)/ &&  ~/.cache/llvm-firtool/1.62.0/bin/firtool --split-verilog GPGPU_SimTop.fir -o .

@@ -30,7 +30,7 @@ struct xreg_result_t {
 struct vreg_result_t {
   std::array<uint32_t, 32> rd; // 写回数据
   uint32_t reg_idx; // 写回地址
-  uint32_t mask;
+  std::array<bool, 32> mask;
   // TBD
 };
 
@@ -85,6 +85,8 @@ struct retireInfo_t {
     uint32_t software_wg_id;
     uint32_t software_warp_id;
     uint32_t retire_cnt;
+    bool barrier_included;
+    bool barrier_retry;
   };
   std::vector<retire_cnt_item_t> warp_retire_cnt;
 };

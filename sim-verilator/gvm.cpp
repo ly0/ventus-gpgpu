@@ -11,6 +11,9 @@
 #include "gvm.hpp"
 #include "gvm_structs.hpp"
 #include <bitset>
+#include <array>
+#include "gvm_macro.h"
+#include <string>
 
 //
 // ------------------------- insn related ----------------------------------------
@@ -51,10 +54,21 @@ void gvm_t::disasm(uint32_t insn, char* insn_name) {
 // ------------------------- gvm_t::getDut() ----------------------------------------------
 //
 
-static uint32_t pack_with_bitset(const std::array<bool,32> &a) {
-  std::bitset<32> bs;
-  for (size_t i = 0; i < 32; ++i) bs[i] = a[i]; // bs[0] 为最低位
-  return static_cast<uint32_t>(bs.to_ulong());
+static std::array<bool, 32> unpack_to_array(uint32_t v, size_t n) {
+    std::bitset<32> bs(v);
+    std::array<bool, 32> a{};
+    for (size_t i = 0; i < n; ++i) {
+        a[i] = bs[i]; // 保持一致：a[0] 对应最低位
+    }
+    return a;
+}
+
+static std::string mask_to_string(const std::array<bool, 32>& mask, size_t n) {
+    std::string s;
+    for (size_t i = 0; i < n; ++i) {
+        s.push_back(mask[i] ? '1' : '0');
+    }
+    return s;
 }
 
 void gvm_t::getDut() {
@@ -256,7 +270,7 @@ void gvm_t::getDutVRegWbFinish() {
               insn_it->second.single_insn_cmp.dut_result.insn_type = InsnType::VREG;
               insn_it->second.single_insn_cmp.dut_result.vreg_result.rd = item.second.rd_data;
               insn_it->second.single_insn_cmp.dut_result.vreg_result.reg_idx = item.second.reg_idx;
-              insn_it->second.single_insn_cmp.dut_result.vreg_result.mask = pack_with_bitset(item.second.wvd_mask);
+              insn_it->second.single_insn_cmp.dut_result.vreg_result.mask = item.second.wvd_mask;
             }
           } else {
             logger->debug(
@@ -450,6 +464,8 @@ void gvm_t::checkRetire() {
     r.software_wg_id = warp.second.software_wg_id;
     r.software_warp_id = warp.second.software_warp_id;
     r.retire_cnt = final_cnt;
+    r.barrier_included = barriered;
+    r.barrier_retry = false;
     retire_info.warp_retire_cnt.push_back(r);
 
     logger->debug(fmt::format("GVM retire message from gvm_t::checkRetire()"));
@@ -470,10 +486,11 @@ void gvm_t::checkRetire() {
 
 
 void gvm_t::stepRef() {
-  for (const auto& item : retire_info.warp_retire_cnt) {
+  for (auto& item : retire_info.warp_retire_cnt) {
     // 分别步进 REF 的每个 warp
     auto warp_it = dut_active_warps.find({ item.software_wg_id, item.software_warp_id });
     assert(warp_it != dut_active_warps.end());
+    assert(item.retire_cnt > 0);
 
     for (int i=0; i<item.retire_cnt; i++) {
       gvmref_step_return_info_t gvmref_step_return_info;
@@ -497,6 +514,17 @@ void gvm_t::stepRef() {
 
       // 步进 REF 并维护 insn_t.single_insn_cmp
       gvmref_step(item.software_wg_id, item.software_warp_id, &gvmref_step_return_info);
+      uint32_t next2_gvmref_pc = gvmref_get_next_pc(item.software_wg_id, item.software_warp_id);
+      if (next2_gvmref_pc == next_gvmref_pc) {
+        logger->debug(fmt::format("GVM warning: REF PC not advanced after step on sm_id: {}, hardware_warp_id: {}, software_wg_id: {}, software_warp_id: {}. REF next PC before step: 0x{:08x}, after step: 0x{:08x}",
+          item.sm_id, item.hardware_warp_id, item.software_wg_id, item.software_warp_id, next_gvmref_pc, next2_gvmref_pc));
+        if (isInsnCare(cur_insn.insn, barrier_insns)) {
+          assert(item.barrier_retry == false); // barrier_retry 应当只被置一次
+          item.barrier_retry = true; // 该 warp 包含 barrier 指令，且 REF PC 未前进，标记 barrier_retry
+        }
+      }
+      // assert(next2_gvmref_pc != next_gvmref_pc); // REF 的 PC 应当已经更新
+
       if (cur_insn.single_insn_cmp.care) {
         // 若为 single_insn_cmp.care 的指令，则从 spike 返回值中提取指令执行结果
         switch (gvmref_step_return_info.insn_result.insn_type) {
@@ -519,7 +547,7 @@ void gvm_t::stepRef() {
             cur_insn.single_insn_cmp.ref_result.vreg_result.reg_idx =
               gvmref_step_return_info.insn_result.vreg_result.reg_idx;
             cur_insn.single_insn_cmp.ref_result.vreg_result.mask =
-              gvmref_step_return_info.insn_result.vreg_result.mask;
+              unpack_to_array(gvmref_step_return_info.insn_result.vreg_result.mask, RTL_NUM_THREAD);
             break;
         }
         if (cur_insn.single_insn_cmp.ref_done == 0) {
@@ -532,6 +560,46 @@ void gvm_t::stepRef() {
         // 避免因 care == 1 但 ref_done 恒为 0 导致该条目永远无法删除
         // 在下面的 doSingleInsnCmp() 中会将其忽略而不进行比较（insn type switch-case 的 default）
       }
+      if (!item.barrier_retry) {
+        cur_insn.retired = true;
+        warp_it->second.next_retire_dispatch_id++;
+      }
+    }
+  }
+  // 步进末尾的 barrier
+  for (const auto& item : retire_info.warp_retire_cnt) {
+    // 分别步进 REF 的每个 warp
+    auto warp_it = dut_active_warps.find({ item.software_wg_id, item.software_warp_id });
+    assert(warp_it != dut_active_warps.end());
+
+    if (item.barrier_included && item.barrier_retry) {
+      gvmref_step_return_info_t gvmref_step_return_info;
+      auto& cur_insn = warp_it->second.insns[warp_it->second.next_retire_dispatch_id];
+      assert(!cur_insn.extended);
+
+      // 确认 DUT 与 REF 的 PC 一致
+      uint32_t next_gvmref_pc;
+      next_gvmref_pc = gvmref_get_next_pc(item.software_wg_id, item.software_warp_id);
+      uint32_t next_dut_pc;
+      next_dut_pc = cur_insn.pc;
+      if (next_dut_pc != next_gvmref_pc) {
+        logger->error(fmt::format("GVM error: DUT and REF next PC mismatch on sm_id: {}, hardware_warp_id: {}, software_wg_id: {}, software_warp_id: {}. DUT next PC: 0x{:08x}, REF next PC: 0x{:08x}",
+          item.sm_id, item.hardware_warp_id, item.software_wg_id, item.software_warp_id, next_dut_pc, next_gvmref_pc));
+      }
+      assert(next_dut_pc == next_gvmref_pc);
+
+      // 步进 REF 并维护 insn_t.single_insn_cmp
+      gvmref_step(item.software_wg_id, item.software_warp_id, &gvmref_step_return_info);
+      uint32_t next2_gvmref_pc = gvmref_get_next_pc(item.software_wg_id, item.software_warp_id);
+      if (next2_gvmref_pc == next_gvmref_pc) {
+        logger->debug(fmt::format("GVM warning: REF PC not advanced after step on sm_id: {}, hardware_warp_id: {}, software_wg_id: {}, software_warp_id: {}. REF next PC before step: 0x{:08x}, after step: 0x{:08x}",
+          item.sm_id, item.hardware_warp_id, item.software_wg_id, item.software_warp_id, next_gvmref_pc, next2_gvmref_pc));
+        logger->error("GVM error: REF PC not advanced after stepping over barrier instruction.");
+        assert(0);
+      }
+      // assert(next2_gvmref_pc != next_gvmref_pc); // REF 的 PC 应当已经更新
+
+      assert(!cur_insn.single_insn_cmp.care);
       cur_insn.retired = true;
       warp_it->second.next_retire_dispatch_id++;
     }
@@ -548,7 +616,7 @@ int gvm_t::doSingleInsnCmp() {
       if (insnIt->second.single_insn_cmp.care) {
         if (insnIt->second.single_insn_cmp.dut_done && insnIt->second.single_insn_cmp.ref_done) {
           switch (insnIt->second.single_insn_cmp.dut_result.insn_type) {
-            case InsnType::XREG:
+            case InsnType::XREG: {
               assert(insnIt->second.single_insn_cmp.ref_result.insn_type == InsnType::XREG);
               if ((insnIt->second.single_insn_cmp.dut_result.xreg_result.rd
                 != insnIt->second.single_insn_cmp.ref_result.xreg_result.rd)
@@ -565,38 +633,40 @@ int gvm_t::doSingleInsnCmp() {
                   insnIt->second.single_insn_cmp.ref_result.xreg_result.rd
                 ));
                 insnIt->second.single_insn_cmp.cmp_pass = -1;
-              }
-              else {
+              } else {
                 insnIt->second.single_insn_cmp.cmp_pass = 1;
               }
               break;
-            case InsnType::VREG:
+            }
+            case InsnType::VREG: {
               assert(insnIt->second.single_insn_cmp.ref_result.insn_type == InsnType::VREG);
+              bool mask_same = std::equal(
+                insnIt->second.single_insn_cmp.dut_result.vreg_result.mask.begin(),
+                insnIt->second.single_insn_cmp.dut_result.vreg_result.mask.begin() + RTL_NUM_THREAD,
+                insnIt->second.single_insn_cmp.ref_result.vreg_result.mask.begin()
+              );
               if ((insnIt->second.single_insn_cmp.dut_result.vreg_result.mask
                 != insnIt->second.single_insn_cmp.ref_result.vreg_result.mask)
-                || (insnIt->second.single_insn_cmp.dut_result.vreg_result.reg_idx
-                != insnIt->second.single_insn_cmp.ref_result.vreg_result.reg_idx))
+                || (!mask_same))
               {
                 logger->error(fmt::format(
                   "GVM error: DUT and REF vreg insn result writeback mask or reg_idx mismatch at sm_id {}, hardware_warp_id {}, software_wg_id {}, software_warp_id {}, dispatch_id {}, pc 0x{:08x}, insn 0x{:08x}"
-                  "insn_type VREG, DUT reg_idx: {}, REF reg_idx: {}, DUT mask: 0x{:08x}, REF mask: 0x{:08x}, DUT reg_idx: {}, REF reg_idx: {}",
+                  "insn_type VREG, DUT reg_idx: {}, REF reg_idx: {}, DUT mask: {}, REF mask: {}, DUT reg_idx: {}, REF reg_idx: {}",
                   warpIt->second.sm_id, warpIt->second.hardware_warp_id, warpIt->second.software_wg_id,
                   warpIt->second.software_warp_id, insnIt->second.dispatch_id, insnIt->second.pc, insnIt->second.insn,
                   insnIt->second.single_insn_cmp.dut_result.vreg_result.reg_idx,
                   insnIt->second.single_insn_cmp.ref_result.vreg_result.reg_idx,
-                  insnIt->second.single_insn_cmp.dut_result.vreg_result.mask,
-                  insnIt->second.single_insn_cmp.ref_result.vreg_result.mask,
+                  mask_to_string(insnIt->second.single_insn_cmp.dut_result.vreg_result.mask, RTL_NUM_THREAD),
+                  mask_to_string(insnIt->second.single_insn_cmp.ref_result.vreg_result.mask, RTL_NUM_THREAD),
                   insnIt->second.single_insn_cmp.dut_result.vreg_result.reg_idx,
                   insnIt->second.single_insn_cmp.ref_result.vreg_result.reg_idx
                 ));
                 insnIt->second.single_insn_cmp.cmp_pass = -1;
-              }
-              else {
+              } else {
                 bool is_fp32 = isInsnCare(insnIt->second.insn, fp32_vreg_insns);
-                for (int i = 0; i < 32; i++) {
-                  if ((insnIt->second.single_insn_cmp.dut_result.vreg_result.mask & (1 << i)) != 0) {
+                for (int i = 0; i < RTL_NUM_THREAD; i++) {
+                  if (insnIt->second.single_insn_cmp.dut_result.vreg_result.mask[i]) {
                     if (is_fp32) {
-                      // 比较浮点数
                       float dut_value = *reinterpret_cast<float*>(&insnIt->second.single_insn_cmp.dut_result.vreg_result.rd[i]);
                       float ref_value = *reinterpret_cast<float*>(&insnIt->second.single_insn_cmp.ref_result.vreg_result.rd[i]);
                       if (std::abs(dut_value - ref_value) > fp32_atol + fp32_rtol * std::abs(ref_value)) {
@@ -606,15 +676,11 @@ int gvm_t::doSingleInsnCmp() {
                           warpIt->second.sm_id, warpIt->second.hardware_warp_id, warpIt->second.software_wg_id, warpIt->second.software_warp_id,
                           insnIt->second.dispatch_id, insnIt->second.pc, insnIt->second.insn,
                           insnIt->second.single_insn_cmp.dut_result.vreg_result.reg_idx,
-                          i,
-                          dut_value,
-                          ref_value
+                          i, dut_value, ref_value
                         ));
                         insnIt->second.single_insn_cmp.cmp_pass = -1;
                       }
-                    }
-                    else {
-                      // 比较非浮点数
+                    } else {
                       if (insnIt->second.single_insn_cmp.dut_result.vreg_result.rd[i]
                         != insnIt->second.single_insn_cmp.ref_result.vreg_result.rd[i]) {
                         logger->error(fmt::format(
@@ -637,9 +703,11 @@ int gvm_t::doSingleInsnCmp() {
                 }
               }
               break;
-            default:
+            }
+            default: {
               insnIt->second.single_insn_cmp.cmp_pass = -2; // unknown insn type
               break;
+            }
           }
         }
       }

@@ -210,7 +210,7 @@ class branch_join(val depth_stack: Int) extends Module{
         val mask = Mux(takeif, if_mask, else_mask)
         val jumpaddr = Mux(takeif, branch_ctl_buf.bits.spike_info.get.pc + 4.U, PC_branch)
         val log_mask = mask.asTypeOf(Vec(num_thread, Bool())).reverse.map{x => p"${Hexadecimal(x.asUInt)}"}.reduceOption(_ + _).getOrElse(p"")
-        printf(log_prefix + log_vbranch + log_mask + p" 0x${Hexadecimal(jumpaddr)}, take_if=${takeif}\n")
+        printf(log_prefix + log_vbranch + log_mask + p" 0x${Hexadecimal(jumpaddr)}, take_if=${takeif}, if_mask = ${Binary(if_mask)}\n")
       } .otherwise {
         printf(log_prefix + p"\n")
       }
