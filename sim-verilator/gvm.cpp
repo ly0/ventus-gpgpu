@@ -718,16 +718,16 @@ int gvm_t::doSingleInsnCmp() {
 
 int gvm_t::doRetireCmp() {
   gvmref_xreg_t gvmref_xreg;
-  gvmref_get_xreg(&gvmref_xreg);
-  for (const auto& item : retire_info.warp_retire_cnt) {
+  for (const auto& item : retire_info.warp_retire_cnt) {    
+  gvmref_get_xreg(&gvmref_xreg, item.software_wg_id, item.software_warp_id);
     auto& warp = dut_active_warps[{item.software_wg_id, item.software_warp_id}];
     for (int i=0; i<warp.xreg_usage; i++) {
-      if (static_cast<uint32_t>(gvmref_xreg.xpr[warp.software_wg_id][warp.software_warp_id][i]) != warp.curr_xreg[i]) {
+      if (static_cast<uint32_t>(gvmref_xreg.xpr[i]) != warp.curr_xreg[i]) {
         logger->error(fmt::format(
           "GVM error: DUT and REF xreg mismatch at sm_id {}, hardware_warp_id {}, software_wg_id {}, software_warp_id {}, reg x{}: DUT = 0x{:08x}, REF = 0x{:08x}",
           warp.sm_id, warp.hardware_warp_id, warp.software_wg_id, warp.software_warp_id, i,
           warp.curr_xreg[i],
-          static_cast<uint32_t>(gvmref_xreg.xpr[warp.software_wg_id][warp.software_warp_id][i])
+          static_cast<uint32_t>(gvmref_xreg.xpr[i])
         ));
       }
     }
