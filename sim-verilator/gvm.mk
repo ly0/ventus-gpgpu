@@ -2,6 +2,7 @@
 ifneq ($(words $(CURDIR)),1)
  $(error Unsupported: GNU Make cannot build in directories containing spaces, build elsewhere: '$(CURDIR)')
 endif
+export MAKEFLAGS += +r
 
 RELEASE ?= 0
 PREFIX ?= $(CURDIR)/install
@@ -159,11 +160,11 @@ verilog: $(VLIB_SRC_V)
 
 verilate: $(VLIB_SRC_V) $(VLIB_SRC_CXX)
 	@mkdir -p $(VLIB_DIR_BUILDOBJ)
-	$(VLIB_VERILATOR) $(VLIB_VERILATOR_FLAGS) $(VLIB_VERILATOR_INPUT)
+	+$(VLIB_VERILATOR) $(VLIB_VERILATOR_FLAGS) $(VLIB_VERILATOR_INPUT)
 
 $(VLIB_VERILATOR_OUTPUT): $(VLIB_SRC_V) $(VLIB_SRC_CXX)
 	@mkdir -p $(VLIB_DIR_BUILDOBJ)
-	$(VLIB_VERILATOR) $(VLIB_VERILATOR_FLAGS) $(VLIB_VERILATOR_INPUT)
+	+$(VLIB_VERILATOR) $(VLIB_VERILATOR_FLAGS) $(VLIB_VERILATOR_INPUT)
 
 $(VLIB_TARGET): $(VLIB_VERILATOR_OUTPUT)
 	$(CXX) $(VLIB_CXXFLAGS) $(VLIB_LDFLAGS) -shared -o $@ \
