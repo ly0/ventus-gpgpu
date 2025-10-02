@@ -4,9 +4,9 @@ import L2cache.{CacheParameters, InclusiveCacheMicroParameters, InclusiveCachePa
 import chisel3.util._
 
 object parameters { //notice log2Ceil(4) returns 2.that is ,n is the total num, not the last idx.
-  def num_sm = 1
+  def num_sm = 2
   var num_warp = 8
-  var num_thread = 16
+  var num_thread = 32
   val SINGLE_INST: Boolean = false
   val SPIKE_OUTPUT: Boolean = true
   val INST_CNT: Boolean = true

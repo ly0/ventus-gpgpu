@@ -651,7 +651,7 @@ int gvm_t::doSingleInsnCmp() {
                 || (!mask_same))
               {
                 logger->error(fmt::format(
-                  "GVM error: DUT and REF vreg insn result writeback mask or reg_idx mismatch at sm_id {}, hardware_warp_id {}, software_wg_id {}, software_warp_id {}, dispatch_id {}, pc 0x{:08x}, insn 0x{:08x}"
+                  "GVM error: DUT and REF vreg insn result writeback mask or reg_idx mismatch at sm_id {}, hardware_warp_id {}, software_wg_id {}, software_warp_id {}, dispatch_id {}, pc 0x{:08x}, insn 0x{:08x}, "
                   "insn_type VREG, DUT reg_idx: {}, REF reg_idx: {}, DUT mask: {}, REF mask: {}, DUT reg_idx: {}, REF reg_idx: {}",
                   warpIt->second.sm_id, warpIt->second.hardware_warp_id, warpIt->second.software_wg_id,
                   warpIt->second.software_warp_id, insnIt->second.dispatch_id, insnIt->second.pc, insnIt->second.insn,
