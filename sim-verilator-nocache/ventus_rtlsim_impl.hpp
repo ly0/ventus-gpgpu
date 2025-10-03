@@ -2,14 +2,16 @@
 
 #include "Vdut.h"
 #include "cta_sche_wrapper.hpp"
-#include "ventus_rtlsim.h"
 #include "physical_mem.hpp"
+#include "ventus_rtlsim.h"
+#include <array>
+#include <bitset>
 #include <memory>
 #include <queue>
 #include <verilated.h>
 #include <verilated_fst_c.h>
-#include <bitset>
-#include <array>
+
+extern const std::unordered_map<std::string, int> rtl_parameters;
 
 #define SNAPSHOT_WAKEUP_SIGNAL SIGRTMIN
 typedef struct {

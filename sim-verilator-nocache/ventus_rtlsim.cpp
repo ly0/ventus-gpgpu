@@ -73,3 +73,13 @@ extern "C" bool ventus_rtlsim_pmemcpy_h2d(ventus_rtlsim_t* sim, paddr_t dst, con
 extern "C" bool ventus_rtlsim_pmemcpy_d2h(ventus_rtlsim_t* sim, void* dst, paddr_t src, uint64_t size) {
     return sim->pmem->read(src, dst, size);
 }
+
+extern "C" int ventus_rtlsim_get_parameter(const char* name, uint32_t* out_value) {
+    if (name == nullptr || out_value == nullptr)
+        return -1;
+    auto it = rtl_parameters.find(name);
+    if (it == rtl_parameters.end())
+        return -2;
+    *out_value = it->second;
+    return 0;
+}

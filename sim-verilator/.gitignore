@@ -6,3 +6,4 @@ install/
 *.fir
 *.v
 *.fst
+rtl_parameters.cpp

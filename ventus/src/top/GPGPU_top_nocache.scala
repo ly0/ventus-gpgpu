@@ -113,4 +113,6 @@ class GPGPU_top_nocache() extends Module {
     sm_wrapper(i).dcache_rsp :<>= io.dcache_rsp(i)
   }
 
+  import top.ParametersToJson
+  ParametersToJson.saveToJson("sim-verilator-nocache/parameters.json")
 }

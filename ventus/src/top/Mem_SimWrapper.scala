@@ -110,5 +110,7 @@ object emitVerilog extends App {
     new GPGPU_SimTop,
     Array("--target-dir", "sim-verilator/", "--target", "verilog")
   )
+  import top.ParametersToJson
+  ParametersToJson.saveToJson("sim-verilator/parameters.json")
 }
 
