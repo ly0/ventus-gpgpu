@@ -14,6 +14,8 @@ import top.parameters._
 import chisel3._
 import chisel3.util._
 import IDecode._
+import mmu.SV32.asidLen
+import top.cache_spike_info
 
 class toShared extends Bundle{
   val instrId = UInt(log2Up(lsu_nMshrEntry).W)
@@ -37,10 +39,12 @@ class DCacheCoreReq_np extends Bundle{
 //  val isWrite = Bool()
   val tag = UInt(dcache_TagBits.W)
   val setIdx = UInt(dcache_SetIdxBits.W)
+  val asid = if(MMU_ENABLED) Some(UInt(asidLen.W)) else None
   val perLaneAddr = Vec(num_thread, new DCachePerLaneAddr)
   val data = Vec(num_thread, UInt(xLen.W))
   val opcode = UInt(3.W)
   val param= UInt(4.W)
+  val spike_info=if(SPIKE_OUTPUT) Some(new cache_spike_info(mmu.SV32)) else None
 }
 
 class DCacheCoreRsp_np extends Bundle{
@@ -171,22 +175,22 @@ class AddrCalculate(val sharedmemory_maxsize: UInt = 4096.U(32.W)) extends Modul
       same_tag(x) := Mux(reg_save.mask(x), addr(x)(xLen-1, xLen-1-dcache_TagBits-dcache_SetIdxBits+1)===Cat(tag, setIdx), false.B)
     )
   val blockOffset = Wire(Vec(num_thread, UInt(dcache_BlockOffsetBits.W)))
-    (0 until num_thread).foreach( x => blockOffset(x) := addr(x)(10, 2) )
+  (0 until num_thread).foreach( x => blockOffset(x) := addr(x)(10, 2) )
   val wordOffset1H = Wire(Vec(num_thread, UInt(BytesOfWord.W)))
-    (0 until num_thread).foreach( x => {
+  (0 until num_thread).foreach( x => {
   //DONE: Add Control Signals in vExeData.ctrl and define lw lh lb
-      wordOffset1H(x) := 15.U(4.W)
-      switch(reg_save.ctrl.mem_whb){
-        is(MEM_W) { wordOffset1H(x) := 15.U }
-        is(MEM_H) { wordOffset1H(x) :=
-          Mux(addr(x)(1)===0.U,
-            3.U,
-            12.U
-          )
-        }
-        is(MEM_B) { wordOffset1H(x) := 1.U << addr(x)(1,0) }
+    wordOffset1H(x) := 15.U(4.W)
+    switch(reg_save.ctrl.mem_whb){
+      is(MEM_W) { wordOffset1H(x) := 15.U }
+      is(MEM_H) { wordOffset1H(x) :=
+        Mux(addr(x)(1)===0.U,
+          3.U,
+          12.U
+        )
       }
-    })
+      is(MEM_B) { wordOffset1H(x) := 1.U << addr(x)(1,0) }
+    }
+  })
   //val reg_toMSHR = Reg(new MshrTag)
   //val vld_toMSHR = Reg(Bool())
   io.to_mshr.bits.tag.mask := reg_save.mask
@@ -221,9 +225,17 @@ class AddrCalculate(val sharedmemory_maxsize: UInt = 4096.U(32.W)) extends Modul
 
   //val vld_toDCache = Reg(Bool())
   io.to_dcache.bits.instrId := reg_entryID
+  if(MMU_ENABLED) {
+    io.to_dcache.bits.asid.get := reg_save.ctrl.asid.get
+  }
+
   // |reg_save| -> |addr & mask| -> |PriorityEncoder| -> |tag & idx| -> |io.to_dcache.bits|
   io.to_dcache.bits.tag := tag
   io.to_dcache.bits.setIdx := setIdx
+  io.to_dcache.bits.spike_info.foreach{ left =>
+    left.pc := reg_save.ctrl.pc
+    left.vaddr := addr_wire
+  }
   val opcode_wire =Wire(UInt(3.W))
   val param_wire_alt =Wire(UInt(4.W))
   param_wire_alt := Mux(reg_save.ctrl.alu_fn===FN_SWAP,16.U,Mux(reg_save.ctrl.alu_fn===FN_AMOADD,0.U,Mux(reg_save.ctrl.alu_fn===FN_XOR,1.U,
@@ -408,49 +420,72 @@ class AddrCalculate(val sharedmemory_maxsize: UInt = 4096.U(32.W)) extends Modul
     }
   }
 
-  if (SPIKE_OUTPUT){
-    when( state===s_save && io.to_mshr.fire && reg_save.ctrl.mem/*&&reg_save.ctrl.wid===wid_to_check.U*/){
-      printf(p"sm ${reg_save.ctrl.spike_info.get.sm_id} warp ${Decimal(reg_save.ctrl.wid)} ")
-      printf(p"0x${Hexadecimal(reg_save.ctrl.spike_info.get.pc)} 0x${Hexadecimal(reg_save.ctrl.spike_info.get.inst)}")
-      when(reg_save.ctrl.mem_cmd === IDecode.M_XRD){
-        printf(p" lsu.r ")
-      }.elsewhen(reg_save.ctrl.mem_cmd === IDecode.M_XWR){
-        printf(p" lsu.w ")
+  if (SPIKE_OUTPUT) {
+  when(state === s_save && io.to_mshr.fire && reg_save.ctrl.mem) {
+    val common_prefix = p"sm ${reg_save.ctrl.spike_info.get.sm_id} warp ${Decimal(reg_save.ctrl.wid)} 0x${Hexadecimal(reg_save.ctrl.spike_info.get.pc)} 0x${Hexadecimal(reg_save.ctrl.spike_info.get.inst)} "
+    when(!reg_save.ctrl.isvec) {
+      when(reg_save.ctrl.mem_cmd === IDecode.M_XRD) {
+        printf(common_prefix + p"lsu.r x ${reg_save.ctrl.reg_idxw} op ${reg_save.ctrl.mop} @ ${Hexadecimal(reg_save.in1(0))}+${Hexadecimal(reg_save.in2(0))}\n")
+      } .elsewhen(reg_save.ctrl.mem_cmd === IDecode.M_XWR) {
+        printf(common_prefix + p"lsu.w x ${reg_save.ctrl.reg_idx2} op ${reg_save.ctrl.mop} ${Hexadecimal(reg_save.in3(0))} @ ${Hexadecimal(reg_save.in1(0))}+${Hexadecimal(reg_save.in2(0))}\n")
       }
-      when(!reg_save.ctrl.isvec){
-        when(reg_save.ctrl.mem_cmd === IDecode.M_XWR){
-          printf(p"x ${reg_save.ctrl.reg_idx2} op ${reg_save.ctrl.mop} ")
-          printf(p"${Hexadecimal(reg_save.in3(0))} ")
-        }.elsewhen(reg_save.ctrl.mem_cmd === IDecode.M_XRD){
-          printf(p"x ${reg_save.ctrl.reg_idxw} op ${reg_save.ctrl.mop} ")
-        }
-        printf(p"@ ${Hexadecimal(reg_save.in1(0))}+${Hexadecimal(reg_save.in2(0))}\n")
-      }.otherwise{
-        when(reg_save.ctrl.mem_cmd === IDecode.M_XWR) {
-          // vsw12 uses inst[24:20] as src
-          when(reg_save.ctrl.disable_mask){
-            printf(p"v${reg_save.ctrl.reg_idx2} op ${reg_save.ctrl.mop} ")
-          }.otherwise{
-            printf(p"v${reg_save.ctrl.reg_idxw} op ${reg_save.ctrl.mop} ")
-          }
-          printf(p"mask ${Binary(reg_save.mask.asUInt)} ")
-          reg_save.in3.reverse.foreach { x => printf(p"${Hexadecimal(x)} ") }
-        }.elsewhen(reg_save.ctrl.mem_cmd === IDecode.M_XRD){
-          printf(p"v${reg_save.ctrl.reg_idx3} op ${reg_save.ctrl.mop} ")
-        }
-        printf(p"@")
-        when(false.B){
-          //(reg_save.in1(x) + reg_save.in2(x))(1,0) + (Cat((io.csr_tid + x.asUInt),0.U(2.W) ) ) + io.csr_pds + (((Cat((reg_save.in1(x)+reg_save.in2(x))(31,2),0.U(2.W)))*io.csr_numw)<<depth_thread) 
-        }.otherwise{
-          //(reg_save.in1 zip reg_save.in2).reverse.foreach(x => printf(p" ${Hexadecimal(x._1)}+${Hexadecimal(x._2)}"))
-          addr.reverse.foreach{ x =>
-            printf(p" ${Hexadecimal(x)}")
-          }
-        }
-        printf(p"\n")
+    } .otherwise {
+      val addr_print: Printable = addr.reverse.map { x => p" ${Hexadecimal(x)}" }.reduceOption(_ + _).getOrElse(p"")
+      when(reg_save.ctrl.mem_cmd === IDecode.M_XRD) {
+        printf(common_prefix + p"lsu.r v${reg_save.ctrl.reg_idx3} op ${reg_save.ctrl.mop} @" + addr_print + p"\n")
+      } .elsewhen(reg_save.ctrl.mem_cmd === IDecode.M_XWR) {
+        val idx = Mux(reg_save.ctrl.disable_mask, reg_save.ctrl.reg_idx2, reg_save.ctrl.reg_idxw)
+        val in3_print: Printable = reg_save.in3.reverse.map { x => p"${Hexadecimal(x)} " }.reduceOption(_ + _).getOrElse(p"")
+        printf(common_prefix + p"lsu.w v${idx} op ${reg_save.ctrl.mop} mask ${Binary(reg_save.mask.asUInt)} " + in3_print + p"@" + addr_print + p"\n")
       }
     }
   }
+}
+
+//   if (SPIKE_OUTPUT){
+//     when( state===s_save && io.to_mshr.fire && reg_save.ctrl.mem/*&&reg_save.ctrl.wid===wid_to_check.U*/){
+//       var log_str = p"sm ${reg_save.ctrl.spike_info.get.sm_id} warp ${Decimal(reg_save.ctrl.wid)} "
+//       log_str += p"0x${Hexadecimal(reg_save.ctrl.spike_info.get.pc)} 0x${Hexadecimal(reg_save.ctrl.spike_info.get.inst)}"
+//       when(reg_save.ctrl.mem_cmd === IDecode.M_XRD){
+//         log_str += p" lsu.r "
+//       }.elsewhen(reg_save.ctrl.mem_cmd === IDecode.M_XWR){
+//         log_str += p" lsu.w "
+//       }
+//       when(!reg_save.ctrl.isvec){
+//         when(reg_save.ctrl.mem_cmd === IDecode.M_XWR){
+//           log_str += p"x ${reg_save.ctrl.reg_idx2} op ${reg_save.ctrl.mop} "
+//           log_str += p"${Hexadecimal(reg_save.in3(0))} "
+//         }.elsewhen(reg_save.ctrl.mem_cmd === IDecode.M_XRD){
+//           log_str += p"x ${reg_save.ctrl.reg_idxw} op ${reg_save.ctrl.mop} "
+//         }
+//         log_str += p"@ ${Hexadecimal(reg_save.in1(0))}+${Hexadecimal(reg_save.in2(0))}\n"
+//       }.otherwise{
+//         when(reg_save.ctrl.mem_cmd === IDecode.M_XWR) {
+//           // vsw12 uses inst[24:20] as src
+//           when(reg_save.ctrl.disable_mask){
+//             log_str += p"v${reg_save.ctrl.reg_idx2} op ${reg_save.ctrl.mop} "
+//           }.otherwise{
+//             log_str += p"v${reg_save.ctrl.reg_idxw} op ${reg_save.ctrl.mop} "
+//           }
+//           log_str += p"mask ${Binary(reg_save.mask.asUInt)} "
+//           reg_save.in3.reverse.foreach { x => log_str += p"${Hexadecimal(x)} " }
+//         }.elsewhen(reg_save.ctrl.mem_cmd === IDecode.M_XRD){
+//           log_str += p"v${reg_save.ctrl.reg_idx3} op ${reg_save.ctrl.mop} "
+//         }
+//         log_str += p"@"
+//         when(false.B){
+//           //(reg_save.in1(x) + reg_save.in2(x))(1,0) + (Cat((io.csr_tid + x.asUInt),0.U(2.W) ) ) + io.csr_pds + (((Cat((reg_save.in1(x)+reg_save.in2(x))(31,2),0.U(2.W)))*io.csr_numw)<<depth_thread) 
+//         }.otherwise{
+//           //(reg_save.in1 zip reg_save.in2).reverse.foreach(x => printf(p" ${Hexadecimal(x._1)}+${Hexadecimal(x._2)}"))
+//           addr.reverse.foreach{ x =>
+//             log_str += p" ${Hexadecimal(x)}"
+//           }
+//         }
+//         log_str += (p"\n")
+//       }
+//       printf(log_str)
+//     }
+//   }
 }
 class LSU2WB extends Module{
   val io = IO(new Bundle{
@@ -485,9 +520,9 @@ class LSU2WB extends Module{
     io.lsu_rsp.ready:=io.lsu_rsp.bits.tag.isWrite//true.B // CONNECTION OF io.lsu_rsp.bits.tag.isWrite
     if(SPIKE_OUTPUT) {
       when(io.lsu_rsp.fire && io.lsu_rsp.bits.tag.isWrite){
-        printf(p"sm ${io.lsu_rsp.bits.tag.spike_info.get.sm_id} warp ${io.lsu_rsp.bits.tag.warp_id} ")
-        printf(p"0x${Hexadecimal(io.lsu_rsp.bits.tag.spike_info.get.pc)} 0x${Hexadecimal(io.lsu_rsp.bits.tag.spike_info.get.inst)} ")
-        printf(p"lsu.w fin\n")
+        printf(p"sm ${io.lsu_rsp.bits.tag.spike_info.get.sm_id} warp ${io.lsu_rsp.bits.tag.warp_id} " + 
+               p"0x${Hexadecimal(io.lsu_rsp.bits.tag.spike_info.get.pc)} 0x${Hexadecimal(io.lsu_rsp.bits.tag.spike_info.get.inst)} " +
+               p"lsu.w finish\n")
       }
     }
   })

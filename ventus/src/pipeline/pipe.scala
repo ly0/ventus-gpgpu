@@ -14,11 +14,13 @@ import L1Cache.ICache._
 import chisel3._
 import chisel3.util._
 import top.parameters._
+import gvm._
 
 class ICachePipeReq_np extends Bundle {
   val addr = UInt(32.W)
   val mask = UInt(num_fetch.W)
   val warpid = UInt(depth_warp.W)
+  val asid = if(MMU_ENABLED) Some(UInt(KNL_ASID_WIDTH.W)) else None
 }
 class ICachePipeRsp_np extends Bundle{
   val addr = UInt(32.W)
@@ -43,7 +45,7 @@ class pipe(val sm_id: Int = 0) extends Module{
     val wg_id_lookup=Output(UInt(depth_warp.W))
     val wg_id_tag=Input(UInt(TAG_WIDTH.W))
     val inst = if (SINGLE_INST) Some(Flipped(DecoupledIO(UInt(32.W)))) else None
-    val inst_cnt = if(INST_CNT) Some(Output(UInt(32.W))) else None
+    val inst_cnt = if(INST_CNT) Some(Output(UInt(32.W))) else if(INST_CNT_2) Some(Output(Vec(2, UInt(32.W)))) else None
     val inst_cnt2 = if(INST_CNT_2) Some(Output(Vec(2, UInt(32.W)))) else None
   })
   val issue_stall=Wire(Bool())
@@ -55,6 +57,19 @@ class pipe(val sm_id: Int = 0) extends Module{
   val control=Module(new InstrDecodeV2)
   control.io.sm_id := sm_id.U
   val operand_collector=Module(new operandCollector)
+  if (GVM_ENABLED) {
+    val gvm_xreg = Module(new GvmDutXReg)
+    gvm_xreg.io.clock := clock
+    gvm_xreg.io.sm_id := sm_id.U(32.W)
+    // gvm_xreg.io.num_bank := num_bank.U(32.W)
+    // gvm_xreg.io.num_sgpr_slots := NUMBER_SGPR_SLOTS.U(32.W)
+    val scalar_flatten_banks = Wire(Vec(num_bank, UInt((NUMBER_SGPR_SLOTS / num_bank * xLen).W)))
+    for (i <- 0 until num_bank) {
+      scalar_flatten_banks(i) := operand_collector.io.scalarBanks.get(i).asUInt
+    }
+    // println(s"checkwidth${scalar_flatten_banks.asUInt.getWidth}")
+    gvm_xreg.io.xbanks := scalar_flatten_banks.asUInt
+  }
   //val issue=Module(new Issue)
   val issueX = Module(new Issue)
   val issueV = Module(new Issue)
@@ -122,9 +137,11 @@ class pipe(val sm_id: Int = 0) extends Module{
   lsu.io.csr_pds:=csrfile.io.lsu_pds
   lsu.io.csr_tid:=csrfile.io.lsu_tid
   lsu.io.csr_numw:=csrfile.io.lsu_numw
-  when(csrfile.io.in.valid && csrfile.io.in.bits.ctrl.custom_signal_0){
-    printf(p"sm ${sm_id} warp ${Decimal(csrfile.io.in.bits.ctrl.wid)} ")
-    printf(p"0x${Hexadecimal(csrfile.io.in.bits.ctrl.pc)} 0x${Hexadecimal(csrfile.io.in.bits.ctrl.inst)}  setrpc 0x${Hexadecimal(csrfile.io.in.bits.in1)} \n")
+  if (SPIKE_OUTPUT) {
+    when(csrfile.io.in.valid && csrfile.io.in.bits.ctrl.custom_signal_0){
+      printf(p"sm ${sm_id} warp ${Decimal(csrfile.io.in.bits.ctrl.wid)} " +
+             p"0x${Hexadecimal(csrfile.io.in.bits.ctrl.pc)} 0x${Hexadecimal(csrfile.io.in.bits.ctrl.inst)}  setrpc 0x${Hexadecimal(csrfile.io.in.bits.in1)} \n")
+    }
   }
 
   warp_sche.io.pc_reset:=io.pc_reset
@@ -168,15 +185,22 @@ class pipe(val sm_id: Int = 0) extends Module{
   ibuffer.io.in.bits.control := control.io.control
   ibuffer.io.in.bits.control_mask := control.io.control_mask
   ibuffer.io.in.valid:=io.icache_rsp.valid& !io.icache_rsp.bits.status(0)
+  if(MMU_ENABLED) {
+    for (i <- 0 until num_fetch) {
+      ibuffer.io.in.bits.control(i).asid.get := warp_sche.io.asid.get
+    }
+  }
   ibuffer.io.flush_wid:=warp_sche.io.flush
 
-  (control.io.control zip control.io.control_mask).foreach{ case (ctrl, mask) =>
-    when(ctrl.alu_fn === 63.U & ibuffer.io.in.valid & mask) {
-      printf(p"sm ${sm_id} warp ${Decimal(ctrl.wid)} ")
-      printf(p"undefined @ 0x${Hexadecimal(ctrl.pc)}: 0x${Hexadecimal(ctrl.inst)}\n")
-    }
-    assert (!(ctrl.alu_fn === 63.U & ibuffer.io.in.valid & mask), s"undefined instruction")
-  }
+  // 进入ibuffer的指令不一定会被实际发射执行，这里不应检测undefined instruction
+  // 例如，指令段之后的一些无用数据也可能进入ibuffer，但实际上因跳转/endprg而不会发射
+  // (control.io.control zip control.io.control_mask).foreach{ case (ctrl, mask) =>
+  //   when(ctrl.alu_fn === 63.U & ibuffer.io.in.valid & mask) {
+  //     printf(p"sm ${sm_id} warp ${Decimal(ctrl.wid)} ")
+  //     printf(p"undefined @ 0x${Hexadecimal(ctrl.pc)}: 0x${Hexadecimal(ctrl.inst)}\n")
+  //   }
+  //   assert (!(ctrl.alu_fn === 63.U & ibuffer.io.in.valid & mask), s"undefined instruction")
+  // }
 
 
 
@@ -247,6 +271,19 @@ class pipe(val sm_id: Int = 0) extends Module{
   scoreb(wb.io.out_x.bits.warp_id).wb_x_fire:=wb.io.out_x.fire
   scoreb(wb.io.out_v.bits.warp_id).wb_v_fire:=wb.io.out_v.fire
 
+  // ibuffer2issue模块的IO都是实际发射但尚未执行的指令，在这检查undefined instruction
+  when(ibuffer2issue.io.out_x.fire){
+    val ctrl = ibuffer2issue.io.out_x.bits
+    assert(ctrl.alu_fn =/= 63.U, 
+           p"UNDEFINED INSTRUCTION @ SM ${sm_id} warp ${Decimal(ctrl.wid)} " + 
+           p"PC 0x${Hexadecimal(ctrl.pc)}: 0x${Hexadecimal(ctrl.inst)}")
+  }
+  when(ibuffer2issue.io.out_v.fire){
+    val ctrl = ibuffer2issue.io.out_v.bits
+    assert(ctrl.alu_fn =/= 63.U, 
+           p"UNDEFINED INSTRUCTION @ SM ${sm_id} warp ${Decimal(ctrl.wid)} " + 
+           p"PC 0x${Hexadecimal(ctrl.pc)}: 0x${Hexadecimal(ctrl.inst)}")
+  }
 
   operand_collector.io.controlV<>ibuffer2issue.io.out_v//ibuffer2issue.io.out.bits
   operand_collector.io.controlX<>ibuffer2issue.io.out_x//ibuffer2issue.io.out.bits

@@ -13,6 +13,7 @@ package pipeline
 import chisel3._
 import chisel3.util._
 import top.parameters._
+import gvm._
 
 class warp_scheduler extends Module{
   val io = IO(new Bundle{
@@ -30,6 +31,7 @@ class warp_scheduler extends Module{
     val exe_busy=Input(UInt(num_warp.W)) //exe race
     //val pc_icache_ready=Input(Vec(num_warp,Bool()))
     val pc_ibuffer_ready=Input(Vec(num_warp,UInt(depth_ibuffer.W))) //ibuffer ready
+    val asid =  if(MMU_ENABLED) Some(Output(UInt(KNL_ASID_WIDTH.W))) else None // 2ibuffer
     val warp_ready=Output(UInt(num_warp.W)) //to issue
     val flush=(ValidIO(UInt(depth_warp.W)))
     val flushCache=(ValidIO(UInt(depth_warp.W)))
@@ -44,7 +46,8 @@ class warp_scheduler extends Module{
 
   val warp_end=io.warp_control.fire&io.warp_control.bits.ctrl.simt_stack_op
   val warp_end_id=io.warp_control.bits.ctrl.wid
-
+  val current_warp=RegInit(0.U(depth_warp.W))
+  val next_warp=WireInit(current_warp)
   io.branch.ready:= !io.flushCache.valid
   io.warp_control.ready:= !io.branch.fire & !io.flushCache.valid
 
@@ -54,6 +57,17 @@ class warp_scheduler extends Module{
 
   io.CTA2csr.bits:=io.warpReq.bits
   io.CTA2csr.valid:=io.warpReq.valid
+
+  val new_warpid = io.warpReq.bits.wid
+
+  if(MMU_ENABLED){
+    val asidReg = Reg(Vec(num_warp,UInt(KNL_ASID_WIDTH.W)))
+    when(io.warpReq.fire){
+      asidReg(new_warpid) := io.warpReq.bits.CTAdata.dispatch2cu_knl_asid.getOrElse(0.U).asUInt
+    }
+    io.asid.get := asidReg(io.pc_rsp.bits.warpid)
+    io.pc_req.bits.asid.get := asidReg(next_warp)
+  }
 
 
   io.flush.valid:=(io.branch.fire&io.branch.bits.jump) | warp_end//(暂定barrier不flush)
@@ -77,14 +91,14 @@ class warp_scheduler extends Module{
   }
   val pc_ready=Wire(Vec(num_warp,Bool()))
 
-  val current_warp=RegInit(0.U(depth_warp.W))
-  val next_warp=WireInit(current_warp)
+
   current_warp:=next_warp
   pcControl(next_warp).PC_replay:= (!io.pc_req.ready)|(!pc_ready(next_warp))
   pcControl(next_warp).PC_src:=2.U
   io.pc_req.bits.addr := pcControl(next_warp).PC_next
   io.pc_req.bits.warpid := next_warp
   io.pc_req.bits.mask := pcControl(next_warp).mask_o
+
 
   io.wg_id_lookup:=Mux(!io.warp_control.bits.ctrl.simt_stack_op,warp_end_id,io.warpRsp.bits.wid) //barrier的时候没有warp_end，只是叫这个名字
 
@@ -95,14 +109,16 @@ class warp_scheduler extends Module{
   val warp_endprg_mask_0 = WireInit(VecInit(Seq.fill(num_block)(false.B)))
   //val warp_bar_cur_next=warp_bar_cur
   //val warp_bar_exp_next=warp_bar_exp
+  val WF_ID_WIDTH = log2Ceil(num_warp_in_a_block)
   val warp_bar_lock=WireInit(VecInit(Seq.fill(num_block)(false.B))) //equals to "active block"
-  val new_wg_id=io.warpReq.bits.CTAdata.dispatch2cu_wf_tag_dispatch(TAG_WIDTH-1,WF_COUNT_WIDTH_PER_WG)
-  val new_wf_id=io.warpReq.bits.CTAdata.dispatch2cu_wf_tag_dispatch(WF_COUNT_WIDTH_PER_WG-1,0)
+  val new_wg_id=io.warpReq.bits.CTAdata.dispatch2cu_wf_tag_dispatch(TAG_WIDTH-1, WF_ID_WIDTH)
+  val new_wf_id=io.warpReq.bits.CTAdata.dispatch2cu_wf_tag_dispatch(WF_ID_WIDTH-1,0)
   val new_wg_wf_count=io.warpReq.bits.CTAdata.dispatch2cu_wg_wf_count
-  val end_wg_id=io.wg_id_tag(TAG_WIDTH-1,WF_COUNT_WIDTH_PER_WG)
-  val end_wf_id=io.wg_id_tag(WF_COUNT_WIDTH_PER_WG-1,0)
+  val end_wg_id=io.wg_id_tag(TAG_WIDTH-1, WF_ID_WIDTH)
+  val end_wf_id=io.wg_id_tag(WF_ID_WIDTH-1, 0)
   val warp_bar_data=RegInit(0.U(num_warp.W))  // 0 means not locked by barrier
   val warp_bar_belong=RegInit(VecInit(Seq.fill(num_block)(0.U(num_warp.W))))
+
 
   when(io.warpReq.fire){
     warp_bar_belong(new_wg_id):=warp_bar_belong(new_wg_id) | (1.U<<io.warpReq.bits.wid).asUInt  //显示warp中有哪些属于wg
@@ -123,6 +139,18 @@ class warp_scheduler extends Module{
     when((warp_bar_cur(end_wg_id) | (1.U<<end_wf_id).asUInt) === warp_bar_exp(end_wg_id)){
       warp_bar_cur(end_wg_id):=0.U
       warp_bar_data:=warp_bar_data & (~warp_bar_belong(end_wg_id)).asUInt
+      if(GVM_ENABLED) {
+        val bar_fire_cond = (io.warp_control.fire&(!io.warp_control.bits.ctrl.simt_stack_op)) &&
+                    ((warp_bar_cur(end_wg_id) | (1.U<<end_wf_id).asUInt) === warp_bar_exp(end_wg_id))
+        val gvm_bar_done = Module(new GvmDutBarrierDone)
+        gvm_bar_done.io.clock := clock
+        gvm_bar_done.io.bar_done_fire := bar_fire_cond
+        gvm_bar_done.io.sm_id := io.warp_control.bits.ctrl.spike_info.get.sm_id.pad(32)
+        gvm_bar_done.io.wg_slot_id := end_wg_id
+        gvm_bar_done.io.pc := io.warp_control.bits.ctrl.spike_info.get.pc.pad(32)
+        gvm_bar_done.io.inst := io.warp_control.bits.ctrl.spike_info.get.inst.pad(32)
+        gvm_bar_done.io.dispatch_id := io.warp_control.bits.ctrl.spike_info.get.dispatch_id.get
+      }
     }
   }
   // collect endprg in one wg and issue flush request
@@ -131,7 +159,7 @@ class warp_scheduler extends Module{
     warp_wg_valid(new_wg_id):=true.B
   }
   when(io.warpRsp.fire){
-    warp_endprg_cnt(new_wg_id) := warp_endprg_cnt(end_wg_id) & (~(1.U<<io.warpRsp.bits.wid)).asUInt
+    warp_endprg_cnt(end_wg_id) := warp_endprg_cnt(end_wg_id) & (~(1.U<<io.warpRsp.bits.wid)).asUInt
   }
   for(i<-0 until num_block){
     warp_endprg_mask_0(i) := (warp_endprg_cnt(i).orR === false.B) && warp_wg_valid(i)

@@ -61,6 +61,7 @@ class CtrlSigs extends Bundle {
   val aq = Bool()
   val rl = Bool()
   //override def cloneType: CtrlSigs.this.type = new CtrlSigs().asInstanceOf[this.type]
+  val asid = if(MMU_ENABLED) Some(UInt(KNL_ASID_WIDTH.W)) else None
 }
 class scoreboardIO extends Bundle{
   val ibuffer_if_ctrl=Input(new CtrlSigs())
@@ -137,5 +138,6 @@ class Scoreboard extends Module{
   dontTouch(readw)
   dontTouch(readb)
   dontTouch(readf)
+  dontTouch(io)
   io.delay:=read1|read2|read3|readm|readw|readb|readf|read_op_colV|read_op_colX
 }
