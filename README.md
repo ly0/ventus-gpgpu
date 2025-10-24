@@ -102,7 +102,7 @@ make init
 
 3. to generate verilog file, use `make verilog`. The output file is `GPGPU_top.v` . Or use `make fpga-verilog` to generate verilog files in `gen_fpga_verilog/` which we use for deploying Ventus on FPGA.
 
-4. to run tests, use `make test`. Output waveform file is at `test_run_dir` . Due to the limitations of `chiseltest`, we have customized another simulation framework based on Verilator. Please refer to the `sim-verilator` folder's README for more details.
+4. to run tests: `make test` is **deprecated**. Output waveform file is at `test_run_dir` . Due to the limitations of `chiseltest`, we have customized another simulation framework based on Verilator. Please refer to the `sim-verilator` folder's README for more details.
 
 It is recommended to use the [ventus-env](https://github.com/THU-DSP-LAB/ventus-env) project to get the complete Ventus toolchain for simulation.    
 `.metadata` and `.data` files are a legacy method for providing testcases in RTL simulation.
